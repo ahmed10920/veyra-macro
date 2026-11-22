@@ -806,7 +806,7 @@ def post_merchant(webhook_url, name, server='', watch=None, collect=False, how='
     colour = MERCHANT_COLOURS.get(name, EMBED_GOLD)
     now = int(time.time())
     action = 'TELEPORT ARMED' if collect else 'ALERT ONLY'
-    title = 'Sinister boss has arrived in Graveyard' if name == 'Sinister S' else '%s %s' % (badge, status)
+    title = 'Sinister boss has arrived in Graveyard' if name == 'Sinister S' else 'Sinister boss has arrived in Pumpkin Moon' if name == 'Sinister P.' else '%s %s' % (badge, status)
     description = '\n'.join([
         merchant_card(name, 'IN YOUR SERVER', action),
         '',
@@ -1207,6 +1207,10 @@ class MacroEngine:
         self._merchant_posted = {}
         self._boss_seen = {}
         self._boss_here = {}                 # boss -> last confirmed presence (monotonic)
+        self._stats_fish = 0                 # per-session totals, posted when the run stops
+        self._stats_merchants = 0
+        self._stats_bosses = 0
+        self._stats_points = 0               # fish points/coins earned from sales
         self.collect = False
         self.wanted = {}
         self.collect_names = set()
@@ -1663,8 +1667,7 @@ class MacroEngine:
             slug = biome_slug(biome) or 'normal'
             if slug == 'sand_storm':
                 slug = 'sandstorm'
-            details = 'Veyra Macro\nMode: %s\nBiome: %s' % (
-                self.presence_mode(), pretty(biome) or 'Normal')
+            details = 'Mode: %s' % self.presence_mode()
             state_lines = []
             if aura:
                 state_lines.append('Aura: %s' % aura)
@@ -1968,6 +1971,11 @@ class MacroEngine:
         # Silent Merchant suppresses only regular merchant spawn alerts.
         is_boss = merchant in ('Sinister P.', 'Sinister S')
         if not self.cfg_bool('silent_merchant') or is_boss:
+            # Count only alerts actually sent, split into regular merchants vs bosses.
+            if is_boss:
+                self._stats_bosses += 1
+            else:
+                self._stats_merchants += 1
             post_merchant(url or self.url, merchant, self.server_link or game.load_settings().get('private_server', ''),
                           watch=list(self.wanted), collect=self.collect and merchant in self.collect_names, how=how)
         else:
@@ -2165,6 +2173,8 @@ class MacroEngine:
         self.equip_due = time.monotonic() if self.equip_aura else None
         self.crack_on, self.in_dimension = self.cfg_bool('eden_on'), True
         self.run_wall, self.equip_busy_at, self.equip_fails = time.time(), -EQUIP_GAP_S, 0
+        self._stats_fish = self._stats_merchants = self._stats_bosses = self._stats_points = 0
+        self.fisher = None
         self.start_biomes(self.url)
         self.paused = False
         game.PAUSED.clear()
@@ -2334,6 +2344,9 @@ class MacroEngine:
         self.daily_at = next_daily()
         halt = lambda: game.ABORT or self.need_rejoin is not None
         busy = lambda: halt() or self.merchant_due is not None or self.pop_due is not None
+        if self.fisher is not None:
+            self._stats_fish += self.fisher.caught
+            self._stats_points += self.fisher.points_earned
         self.fisher = fishing.Fisher(
             vip=self.cfg_bool('fish_vip', True),
             sell_every=self.sell_every(),
@@ -2461,6 +2474,31 @@ class MacroEngine:
             note('run', 'run ended by the stall watchdog')
             return
         note('run', 'run ended%s' % (' (Stop pressed)' if game.ABORT else ''))
+        # Post macro stats to Discord webhook on stop
+        if self.url:
+            try:
+                total_fish = self._stats_fish + (self.fisher.caught if self.fisher else 0)
+                points = self._stats_points + (self.fisher.points_earned if self.fisher else 0)
+                merchants = self._stats_merchants
+                boss_alerts = self._stats_bosses
+                embed = {
+                    'title': 'Macro Run Ended',
+                    'description': 'Run summary',
+                    'color': 0xED4245,
+                    'fields': [
+                        {'name': 'Fish caught', 'value': str(total_fish), 'inline': True},
+                        {'name': 'Fish points', 'value': '{:,}'.format(points), 'inline': True},
+                        {'name': 'Merchants alerted', 'value': str(merchants), 'inline': True},
+                        {'name': 'Boss alerts', 'value': str(boss_alerts), 'inline': True},
+                    ],
+                    'footer': {'text': 'Veyra · v1.0.3'},
+                }
+                payload = {'embeds': [embed]}
+                _post(self.url, payload)
+                note('webhook', 'stats: %d fish, %s points, %d merchants, %d bosses'
+                     % (total_fish, format(points, ','), merchants, boss_alerts))
+            except Exception as e:
+                note('webhook', 'stats post failed: %s: %s' % (type(e).__name__, e))
 
     def jump(self):
         try:

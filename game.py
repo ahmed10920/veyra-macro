@@ -1948,7 +1948,10 @@ def daily_by_clicks(halt=stopped):
         state = daily_state()
     if state is None and not daily_open():
         return False
-    if state == 'claim':
+    # The Daily Rewards window is open: always attempt to click Claim first,
+    # even if color detection failed (state is None) or says 'claimed'
+    # (colors can vary). Clicking Claim when already claimed is harmless.
+    if daily_open() and state != 'claimed':
         press_point('daily_claim', settle=1.5)
         paced(DAILY_CLAIM_S)             # the rewards fly in before the X works again
     # Always try once: after claiming, the X can briefly hide under the animation.
