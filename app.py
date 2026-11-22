@@ -4583,47 +4583,328 @@ def _clear_old_unpacks():
         note('cleanup', '%s: %s' % (type(e).__name__, e))
 
 
-def only_one():
+def _other_instance_pids():
+    """Other Veyra processes for this install. Calibrator windows are not copies of the app."""
+    me = os.getpid()
+    app = os.path.normcase(os.path.abspath(os.path.join(HERE_DIR, 'app.py')))
+    exe = os.path.normcase(os.path.abspath(sys.executable))
+    frozen = getattr(sys, 'frozen', False)
+    found = []
+    try:
+        import psutil
+    except Exception:
+        return found
+    for proc in psutil.process_iter(['pid', 'cmdline']):
+        try:
+            pid = int(proc.info['pid'] or 0)
+            if not pid or pid == me:
+                continue
+            cmd = proc.info['cmdline'] or []
+            joined = ' '.join(cmd).lower()
+            if '--calibrate' in joined:
+                continue
+            if frozen:
+                if cmd and os.path.normcase(os.path.abspath(cmd[0])) == exe:
+                    found.append(pid)
+                continue
+            for arg in cmd:
+                if not arg.lower().endswith('app.py'):
+                    continue
+                if os.path.normcase(os.path.abspath(arg)) == app:
+                    found.append(pid)
+                    break
+        except (OSError, ValueError, psutil.Error):
+            continue
+    return found
+
+
+def _release_instance_lock():
     global _one
-    k = ctypes.WinDLL('kernel32', use_last_error=True)
-    k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-    k.CreateMutexW.restype = ctypes.c_void_p          # 64-bit handles are not c_int
-    ctypes.set_last_error(0)
-    local = k.CreateMutexW(None, False, 'Local\\MMacroHUD')
-    _one = [local]
-    if not local or ctypes.get_last_error() == 183:
-        return 'Veyra is already open.'
-    user = re.sub(r'[^\w.-]', '_', os.environ.get('USERDOMAIN', '') + '.' + os.environ.get('USERNAME', ''))
-    ctypes.set_last_error(0)
-    glob = k.CreateMutexW(None, False, 'Global\\MMacroHUD-' + user)
-    _one.append(glob)
-    if not glob or ctypes.get_last_error() == 183:
-        return ('Veyra is already running for this Windows account in another session (another RDP).\n\n'
-                'Two macros on one account share Roblox\'s logs and Veyra\'s settings, so each RDP needs its own '
-                'Windows account. Log the second RDP into a different account, then open Veyra there.')
-    return None
+    k = ctypes.windll.kernel32
+    for h in list(_one or []):
+        try:
+            if h:
+                k.CloseHandle(ctypes.c_void_p(h))
+        except Exception:
+            pass
+    _one = []
 
 
-def _focus_existing_mmacro():
+def _visible_windows(pids):
+    """Visible top-level windows owned by these processes."""
     u32 = ctypes.windll.user32
+    wanted = set(int(p) for p in pids)
     found = []
 
     def cb(h, _):
-        n = u32.GetWindowTextLengthW(h)
-        if n > 0:
-            buf = ctypes.create_unicode_buffer(n + 1)
-            u32.GetWindowTextW(h, buf, n + 1)
-            if (buf.value == TITLE or buf.value.startswith(TITLE + '  |')) and u32.IsWindowVisible(h):
-                found.append(h)
+        if not wanted:
+            return True
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        if pid.value in wanted and u32.IsWindowVisible(h):
+            found.append(h)
         return True
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     u32.EnumWindows(WNDENUMPROC(cb), 0)
-    if found:
-        u32.ShowWindow(found[0], 9)
-        u32.SetForegroundWindow(found[0])
+    return found
+
+
+def _end_stuck_instances(pids):
+    """Close leftover Veyra processes that have no window, so a new launch can open."""
+    try:
+        import psutil
+    except Exception:
+        return
+    for pid in pids:
+        try:
+            psutil.Process(int(pid)).kill()
+        except (OSError, ValueError, psutil.Error):
+            pass
+
+
+def only_one(_retry=True):
+    """One Veyra per Windows session. A second launch must not open another copy."""
+    global _one, _existing_pids
+    others = _other_instance_pids()
+    visible = _visible_windows(others)
+    stuck = []
+    if others and not visible:
+        now = time.time()
+        try:
+            import psutil
+            for pid in others:
+                try:
+                    age = now - psutil.Process(int(pid)).create_time()
+                except (OSError, ValueError, psutil.Error):
+                    age = 999
+                if age >= 8:
+                    stuck.append(pid)
+        except Exception:
+            stuck = list(others)
+    _existing_pids = [pid for pid in others if pid not in stuck]
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    k.CreateMutexW.restype = ctypes.c_void_p
+    k.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+                              ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+    k.CreateFileW.restype = ctypes.c_void_p
+    invalid = ctypes.c_void_p(-1).value
+    ctypes.set_last_error(0)
+    local = k.CreateMutexW(None, False, 'Local\\VeyraSingle')
+    local_busy = (not local) or ctypes.get_last_error() == 183
+    lock_path = os.path.join(os.getenv('LOCALAPPDATA') or os.path.expanduser('~'), 'Veyra', 'instance.lock')
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    except OSError:
+        pass
+    ctypes.set_last_error(0)
+    file_h = k.CreateFileW(lock_path, 0x80000000 | 0x40000000, 0, None, 4, 0x80, None)
+    file_busy = (not file_h) or file_h == invalid
+    _one = []
+    if not local_busy and local:
+        _one.append(local)
+    elif local:
+        k.CloseHandle(ctypes.c_void_p(local))
+    if not file_busy and file_h:
+        _one.append(file_h)
+    elif file_h and file_h != invalid:
+        k.CloseHandle(ctypes.c_void_p(file_h))
+    if stuck:
+        _end_stuck_instances(stuck)
+        if local_busy or file_busy:
+            _release_instance_lock()
+            if _retry:
+                time.sleep(0.4)
+                return only_one(_retry=False)
+            return 'Veyra is already open.'
+    if local_busy or file_busy or _existing_pids:
+        if _one and not (local_busy or file_busy):
+            _release_instance_lock()
+        return 'Veyra is already open.'
+    user = re.sub(r'[^\w.-]', '_', os.environ.get('USERDOMAIN', '') + '.' + os.environ.get('USERNAME', ''))
+    ctypes.set_last_error(0)
+    glob = k.CreateMutexW(None, False, 'Global\\VeyraSingle-' + user)
+    glob_busy = (not glob) or ctypes.get_last_error() == 183
+    if glob_busy:
+        if glob:
+            k.CloseHandle(ctypes.c_void_p(glob))
+        _release_instance_lock()
+        return ('Veyra is already running for this Windows account in another session (another RDP).\n\n'
+                'Two macros on one account share Roblox\'s logs and Veyra\'s settings, so each RDP needs its own '
+                'Windows account. Log the second RDP into a different account, then open Veyra there.')
+    _one.append(glob)
+    return None
+
+
+def _focus_existing_mmacro():
+    """Bring the Veyra that is already running to the front. Do not open a second one."""
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    wanted = set(_existing_pids or [])
+    found = []
+
+    def cb(h, _):
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        title = ''
+        n = u32.GetWindowTextLengthW(h)
+        if n > 0:
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u32.GetWindowTextW(h, buf, n + 1)
+            title = buf.value or ''
+        title_ok = title == TITLE or title.startswith(TITLE + '  |')
+        if u32.IsWindowVisible(h) and (pid.value in wanted or title_ok):
+            found.append((0 if title_ok else 1, h))
         return True
-    return False
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    u32.EnumWindows(WNDENUMPROC(cb), 0)
+    if not found:
+        return False
+    found.sort()
+    hwnd = found[0][1]
+    u32.ShowWindow(hwnd, 9)
+    fg = u32.GetForegroundWindow()
+    this_tid = k32.GetCurrentThreadId()
+    fg_tid = u32.GetWindowThreadProcessId(fg, None) if fg else 0
+    if fg_tid and fg_tid != this_tid:
+        u32.AttachThreadInput(this_tid, fg_tid, True)
+    u32.BringWindowToTop(hwnd)
+    u32.SetForegroundWindow(hwnd)
+    if fg_tid and fg_tid != this_tid:
+        u32.AttachThreadInput(this_tid, fg_tid, False)
+    return True
+
+
+def _installed_icon():
+    """Path the shell should show, and a token that changes when that icon file changes."""
+    if getattr(sys, 'frozen', False):
+        path = os.path.abspath(sys.executable)
+        location = path + ',0'
+    else:
+        path = os.path.join(HERE_DIR, 'icon.ico')
+        if not os.path.isfile(path):
+            return '', '', ''
+        path = os.path.abspath(path)
+        location = path + ',0'
+    try:
+        st = os.stat(path)
+    except OSError:
+        return '', '', ''
+    token = '%s|%s|%s' % (path.lower(), st.st_size, int(st.st_mtime))
+    if path.lower().endswith('.ico') and st.st_size < 5_000_000:
+        try:
+            import hashlib
+            h = hashlib.sha256()
+            with open(path, 'rb') as f:
+                h.update(f.read())
+            token = path.lower() + '|' + h.hexdigest()
+        except OSError:
+            pass
+    return path, location, token
+
+
+def _apply_window_icon(hwnd):
+    """Put the current icon.ico on this window so the title bar and taskbar match the update."""
+    ico = os.path.join(HERE_DIR, 'icon.ico')
+    if not hwnd or not os.path.isfile(ico):
+        return
+    user32 = ctypes.windll.user32
+    user32.LoadImageW.restype = ctypes.c_void_p
+    user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
+    IMAGE_ICON = 1
+    LR_LOADFROMFILE = 0x0010
+    big = user32.LoadImageW(None, ico, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
+    small = user32.LoadImageW(None, ico, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+    WM_SETICON = 0x0080
+    if big:
+        user32.SendMessageW(hwnd, WM_SETICON, 1, big)
+    if small:
+        user32.SendMessageW(hwnd, WM_SETICON, 0, small)
+
+
+def _notify_shell_icon(*paths):
+    shell32 = ctypes.windll.shell32
+    SHCNE_UPDATEITEM = 0x00002000
+    SHCNE_ASSOCCHANGED = 0x08000000
+    SHCNF_PATHW = 0x0005
+    SHCNF_FLUSH = 0x1000
+    SHCNF_IDLIST = 0x0000
+    for p in paths:
+        if p and os.path.exists(p):
+            shell32.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, ctypes.c_wchar_p(os.path.abspath(p)), None)
+    shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+
+
+def _sync_installed_icon():
+    """When an update replaces the icon, point shortcuts at it and drop the old Windows cache."""
+    path, location, token = _installed_icon()
+    if not path or not location or not token:
+        return
+    stamp_dir = os.path.join(os.getenv('LOCALAPPDATA') or os.path.expanduser('~'), 'Veyra')
+    stamp_path = os.path.join(stamp_dir, 'icon.stamp')
+    try:
+        with open(stamp_path, encoding='utf-8') as f:
+            prev = f.read().strip()
+    except OSError:
+        prev = ''
+    if prev == token:
+        return
+    app_py = '' if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(HERE_DIR, 'app.py'))
+    exe = os.path.abspath(sys.executable) if getattr(sys, 'frozen', False) else ''
+    ps1 = os.path.join(tempfile.gettempdir(), 'veyra_icon_refresh.ps1')
+    script = r'''param($IconLoc, $Exe, $AppPy, $AppDir)
+$sh = New-Object -ComObject WScript.Shell
+$dirs = @(
+  [Environment]::GetFolderPath('Desktop'),
+  [Environment]::GetFolderPath('CommonDesktopDirectory'),
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu'),
+  (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu'),
+  (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
+  $AppDir
+)
+$n = 0
+foreach ($d in $dirs) {
+  if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+  Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $lnk = $sh.CreateShortcut($_.FullName)
+      $target = [string]$lnk.TargetPath
+      $args = [string]$lnk.Arguments
+      $match = $false
+      if ($Exe -and ($target -ieq $Exe)) { $match = $true }
+      if ($AppPy -and $args -and ($args -like ('*' + $AppPy + '*'))) { $match = $true }
+      if ($match) {
+        $lnk.IconLocation = $IconLoc
+        $lnk.Save()
+        $n++
+      }
+    } catch {}
+  }
+}
+Write-Output $n
+'''
+    try:
+        with open(ps1, 'w', encoding='utf-8') as f:
+            f.write(script)
+        subprocess.run(
+            ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1,
+             '-IconLoc', location, '-Exe', exe, '-AppPy', app_py, '-AppDir', os.path.abspath(HERE_DIR)],
+            capture_output=True, text=True, timeout=25,
+        )
+    except Exception as e:
+        note('update', 'icon refresh failed: %s' % e)
+        return
+    _notify_shell_icon(path, exe)
+    try:
+        os.makedirs(stamp_dir, exist_ok=True)
+        with open(stamp_path, 'w', encoding='utf-8') as f:
+            f.write(token)
+    except OSError:
+        pass
+    note('update', 'app icon updated')
 
 
 def main():
@@ -4633,7 +4914,8 @@ def main():
         sys.exit(0)
     why = only_one()
     if why:
-        if why == 'Veyra is already open.' and _focus_existing_mmacro():
+        if why == 'Veyra is already open.':
+            _focus_existing_mmacro()
             sys.exit(0)
         dark_message(TITLE, why)
         sys.exit(0)
@@ -4662,8 +4944,10 @@ def main():
             hwnd = _find_own_hwnd()
             engine._hwnd = hwnd
             _dark_titlebar_hwnd(hwnd)
+            _apply_window_icon(hwnd)
         except Exception:
             pass
+        threading.Thread(target=_sync_installed_icon, daemon=True).start()
         engine.check_update()
 
     window.events.shown += on_shown
