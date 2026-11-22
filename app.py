@@ -253,7 +253,7 @@ BIOMES_DIR = os.path.join(HERE_DIR, 'biomes')
 os.makedirs(BIOMES_DIR, exist_ok=True)
 
 TITLE = 'Veyra'
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 
 # Unified developer-mode passkey (baked into the .exe; session-only unlock).
 # Only the person who knows this key can open Developer Mode.
@@ -2491,7 +2491,7 @@ class MacroEngine:
                         {'name': 'Merchants alerted', 'value': str(merchants), 'inline': True},
                         {'name': 'Boss alerts', 'value': str(boss_alerts), 'inline': True},
                     ],
-                    'footer': {'text': 'Veyra · v1.0.3'},
+                    'footer': {'text': 'Veyra · v%s' % VERSION},
                 }
                 payload = {'embeds': [embed]}
                 _post(self.url, payload)
