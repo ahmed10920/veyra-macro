@@ -21,22 +21,23 @@ from pynput import mouse
 import game
 import eden
 
-BG = '#050810'
-SIDEBAR_BG = '#070b14'
-PANEL = '#0b1220'
-PANEL_ALT = '#111c30'
-SUNK = '#04070d'
-EDGE = '#17263d'
-TEXT = '#f1f5f9'
-SUBTEXT = '#94a3b8'
-DIM = '#58677a'
-ACCENT = '#38bdf8'
-ACCENT_HOVER = '#7dd3fc'
-ACCENT_BG = '#0d2238'
-GOOD = '#22d3ee'
-GOOD_BG = '#0a2534'
-WARN = '#fbbf24'
-BAD = '#f87171'
+# Black & White (BW) theme — monochrome
+BG = '#000000'
+SIDEBAR_BG = '#0c0c0c'
+PANEL = '#121212'
+PANEL_ALT = '#161616'
+SUNK = '#080808'
+EDGE = '#222222'
+TEXT = '#ffffff'
+SUBTEXT = '#bbbbbb'
+DIM = '#777777'
+ACCENT = '#ffffff'
+ACCENT_HOVER = '#cccccc'
+ACCENT_BG = '#181818'
+GOOD = '#cccccc'
+GOOD_BG = '#0e0e0e'
+WARN = '#cccccc'
+BAD = '#aaaaaa'
 
 UI, UIB = 'Segoe UI', 'Segoe UI Semibold'
 SMALL_BUTTON = dict(bg=PANEL_ALT, fg=TEXT, activebackground=ACCENT, activeforeground=BG, relief='flat',
@@ -80,7 +81,8 @@ class CalibrateWindow(tk.Tk):
         self.only = points is not None
         sections = [(None, points)] if points else [
             ('Items (Auto SC + BR)', game.POINTS), ('Fishing', game.FISH_POINTS),
-            ('Merchant collection', game.MERCHANT_POINTS), ('Daily rewards', game.DAILY_POINTS)]
+            ('Merchant collection', game.MERCHANT_POINTS), ('Skip intro', game.SKIP_POINTS),
+            ('Daily rewards', game.DAILY_POINTS)]
         self.points = [p for _, group in sections for p in group]
         self.capturing = None
         self.banner = None
@@ -299,12 +301,131 @@ class ToastService:
     def __init__(self):
         self._q = queue.Queue()
         self._started = False
+        self._init_lock = threading.Lock()
+        self._banner_q = queue.Queue()
+        self._banner_started = False
+        self._banner_lock = threading.Lock()
 
     def show(self, text, colour=TEXT, ms=2200):
         if not self._started:
-            self._started = True
-            threading.Thread(target=self._run, daemon=True).start()
+            with self._init_lock:
+                if not self._started:
+                    self._started = True
+                    threading.Thread(target=self._run, daemon=True).start()
         self._q.put((text, colour, ms))
+
+    def banner(self, kind, ms=2000):
+        """Veyra icon + STARTED (green) / STOPPED (red), topmost for `ms` then hidden."""
+        if not self._banner_started:
+            with self._banner_lock:
+                if not self._banner_started:
+                    self._banner_started = True
+                    threading.Thread(target=self._banner_run, daemon=True).start()
+        self._banner_q.put((kind, ms))
+
+    def _banner_run(self):
+        """Big, centered, click-through pill with the Veyra compass and a status word."""
+        from PIL import Image, ImageTk
+
+        dpi_aware()
+        u32 = ctypes.windll.user32
+        place = ctypes.WinDLL('user32').SetWindowPos
+        place.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                          ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        TOPMOST = ctypes.c_void_p(-1 & 0xFFFFFFFFFFFFFFFF)
+
+        root = tk.Tk()
+        root.withdraw()
+        top = tk.Toplevel(root, bg='#0b1220')
+        top.overrideredirect(True)
+        top.attributes('-topmost', True)
+
+        big = tkfont.Font(root, family=UIB, size=19, weight='bold')
+        sub = tkfont.Font(root, family=UIB, size=9)
+
+        frame = tk.Frame(top, bg='#0b1220', padx=26, pady=14)
+        frame.pack()
+        icon_lbl = tk.Label(frame, bg='#0b1220')
+        icon_lbl.grid(row=0, column=0, padx=(0, 13), sticky='ns')
+        text_lbl = tk.Label(frame, bg='#0b1220', fg='#f8fafc', font=big, anchor='w')
+        text_lbl.grid(row=0, column=1, sticky='w')
+        sub_lbl = tk.Label(frame, bg='#0b1220', fg='#94a3b8', font=sub, anchor='w')
+        sub_lbl.grid(row=1, column=1, sticky='w', pady=(4, 0))
+
+        # Veyra compass icon, with pre-rendered spin frames
+        spin, spin_i = [], [0]
+        try:
+            path = os.path.join(HERE, 'ui', 'brand_bh.png')
+            img = Image.open(path).convert('RGBA')
+            img.thumbnail((40, 40), Image.LANCZOS)
+            spin = [ImageTk.PhotoImage(img.rotate(a, resample=Image.BICUBIC))
+                    for a in range(0, 360, 30)]
+            icon_lbl.configure(image=spin[0])
+        except Exception:
+            pass
+
+        def animate():
+            if spin and shown[0]:
+                spin_i[0] = (spin_i[0] + 1) % len(spin)
+                icon_lbl.configure(image=spin[spin_i[0]])
+            root.after(80, animate)
+
+        top.withdraw()
+        top.update_idletasks()
+        hwnd = u32.GetParent(top.winfo_id()) or top.winfo_id()
+        ex = u32.GetWindowLongW(hwnd, -20)
+        u32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x80 | 0x20)  # click-through (no layered: it hides the window)
+
+        kinds = {
+            'start': ('MACRO STARTED', '#4ade80', 'Veyra is running'),
+            'stop': ('MACRO STOPPED', '#f87171', 'Veyra has stopped'),
+        }
+        job = [None]
+        shown = [False]
+
+        def hide():
+            job[0] = None
+            shown[0] = False
+            u32.ShowWindow(hwnd, 0)
+
+        def poll():
+            try:
+                while True:
+                    kind, ms = self._banner_q.get_nowait()
+                    word, color, note_text = kinds.get(kind, kinds['start'])
+                    frame.configure(bg='#0b1220')
+                    for lbl in (icon_lbl, text_lbl, sub_lbl):
+                        lbl.configure(bg='#0b1220')
+                    text_lbl.configure(text=word, fg=color)
+                    sub_lbl.configure(text=note_text)
+                    top.update_idletasks()
+                    w, h = top.winfo_reqwidth(), top.winfo_reqheight()
+                    _clip_pill(hwnd, w, h)
+                    x, y, cw, ch = 0, 0, top.winfo_screenwidth(), top.winfo_screenheight()
+                    try:
+                        win = game.find_roblox_window()
+                        if win is not None:
+                            x, y, cw, ch = game.client_rect(win)
+                    except Exception:
+                        pass
+                    # top-center over the game
+                    place(hwnd, TOPMOST, x + max(0, (cw - w) // 2), y + max(18, ch // 14),
+                          w, h, 0x0010 | 0x0040)
+                    u32.ShowWindow(hwnd, 5)
+                    top.lift()
+                    top.attributes('-topmost', True)
+                    shown[0] = True
+                    if job[0] is not None:
+                        top.after_cancel(job[0])
+                    job[0] = top.after(ms, hide)
+            except queue.Empty:
+                pass
+            root.after(40, poll)
+
+        if spin:
+            root.after(80, animate)
+        root.after(40, poll)
+        root.mainloop()
 
     def _run(self):
         dpi_aware()
@@ -327,7 +448,7 @@ class ToastService:
         top.update_idletasks()
         hwnd = u32.GetParent(top.winfo_id()) or top.winfo_id()
         ex = u32.GetWindowLongW(hwnd, -20)
-        u32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x80 | 0x20 | 0x80000)
+        u32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x80 | 0x20)
         job = [None]
 
         def hide():
@@ -371,7 +492,12 @@ def run(mode='all'):
         dark_titlebar(r)
         messagebox.showinfo('Veyra', 'Open Roblox first, then calibrate.')
         return
-    pts = game.PLAY_POINT if mode == 'play' else eden.POINTS if mode == 'contract' else None
+    if mode == 'play':
+        pts = game.PLAY_POINT
+    elif mode == 'contract':
+        pts = eden.POINTS
+    else:
+        pts = None
     CalibrateWindow(pts).mainloop()
 
 

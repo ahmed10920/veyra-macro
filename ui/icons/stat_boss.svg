@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="0" stdDeviation="1.1" flood-color="#67e8f9" flood-opacity="0.9"/>
+    </filter>
+  </defs>
+  <rect x="2.5" y="2.5" width="59" height="59" rx="14" fill="#071018" stroke="#67e8f9" stroke-width="1.6"/>
+  <path d="M32 11.5 49.5 21.5v21L32 52.5 14.5 42.5v-21Z" fill="none" stroke="#67e8f9" stroke-width="1.35" opacity="0.9"/>
+  <g filter="url(#glow)">
+    <circle cx="32" cy="32" r="13.55" fill="#7af3ff"/>
+    <path fill="#071018" d="M32 19.55C34.2 25.65 38.35 29.8 44.45 32 38.35 34.2 34.2 38.35 32 44.45 29.8 38.35 25.65 34.2 19.55 32 25.65 29.8 29.8 25.65 32 19.55Z"/>
+    <circle cx="32" cy="32" r="4.02" fill="#7af3ff"/>
+  </g>
+</svg>

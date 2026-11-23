@@ -203,7 +203,7 @@ def find(img, name, pxs, box=None, plane=None, ring=False):
     g = unlined(g, 0.8 * max(pxs) * f + 4, 0.9 * max(pxs) * f + 4)       # letters: 0.6 em wide, 0.75 em tall
     if g.std() < 1.0:
         return top
-    if ring and (g > 64).sum() < 0.2 * outline(name, min(pxs)) * f:
+    if ring and (g > 64).sum() < 0.2 * outline(name, min(pxs)) * f * f:   # g was scaled by f in each axis
         return top                                          # hardly any of its colour here: -1
     fr = min(1.0, ROUGH / (min(pxs) * f))                  # the rough look is done at about ROUGH px
     for v, at, px in peaks(edges(resize(g, fr), 1.5), name, pxs, f * fr, ring):

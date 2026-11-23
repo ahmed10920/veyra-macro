@@ -74,6 +74,9 @@ DEFAULTS = {
     "eden_record": False,     # record 60 s when Eden shows
     "eden_path": True,        # walk to Eden and sign the contract
     "merchant_on": False,     # spots merchants via Roblox's cache
+    "boss_on": False,         # Halloween bosses (Sinister S, Sinister P.)
+    "roblox_on_top": False,   # re-bring the Roblox window forward when it falls behind
+    "skip_intro": True,       # click through the flash warning / intro, no calibration
     "collect_on": False,
     "collect_merchants": ["Jester", "Mari", "Rin"],
     "buy_items": {},
@@ -124,15 +127,28 @@ def _kind(value):
 
 
 def load_settings():
-    """Settings, with anything unreadable or the wrong type left at its default."""
+    """Settings from the local DB, falling back to the old file once for upgrades."""
     cfg = dict(DEFAULTS)
+    stored = {}
     try:
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            stored = json.load(f)
-        if isinstance(stored, dict):
-            cfg.update({k: v for k, v in stored.items() if k not in DEFAULTS or _kind(v) == _kind(DEFAULTS[k])})
-    except (OSError, ValueError):
+        import local_db
+        stored = local_db.get_settings()
+    except Exception:
         pass
+    if not stored:
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                stored = json.load(f)
+            if isinstance(stored, dict):
+                try:
+                    import local_db
+                    local_db.save_settings(stored)          # one-time import into the DB
+                except Exception:
+                    pass
+        except (OSError, ValueError):
+            stored = {}
+    if isinstance(stored, dict):
+        cfg.update({k: v for k, v in stored.items() if k not in DEFAULTS or _kind(v) == _kind(DEFAULTS[k])})
     return cfg
 
 
@@ -140,10 +156,15 @@ _settings_lock = threading.Lock()
 
 
 def save_settings(cfg):
-    """Merge into the stored file. Retries the swap since antivirus can lock it."""
+    """Merge into the local DB (with a JSON mirror for older builds)."""
     with _settings_lock:
         merged = load_settings()
         merged.update(cfg)
+        try:
+            import local_db
+            local_db.save_settings(merged)
+        except Exception:
+            pass
         os.makedirs(APP_DIR, exist_ok=True)
         tmp = CONFIG_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -369,6 +390,27 @@ u32.MapVirtualKeyExW.argtypes = [wintypes.UINT, wintypes.UINT, wintypes.HKL]
 u32.MapVirtualKeyExW.restype = wintypes.UINT
 u32.VkKeyScanExW.argtypes = [wintypes.WCHAR, wintypes.HKL]
 u32.VkKeyScanExW.restype = ctypes.c_short
+u32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+u32.AllowSetForegroundWindow.restype = wintypes.BOOL
+u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+u32.SetWindowPos.restype = ctypes.c_bool
+for _fn, _args, _res in (
+        (u32.SetForegroundWindow, [ctypes.c_void_p], wintypes.BOOL),
+        (u32.BringWindowToTop, [ctypes.c_void_p], wintypes.BOOL),
+        (u32.ShowWindow, [ctypes.c_void_p, ctypes.c_int], wintypes.BOOL),
+        (u32.IsIconic, [ctypes.c_void_p], wintypes.BOOL),
+        (u32.IsWindow, [ctypes.c_void_p], wintypes.BOOL),
+        (u32.keybd_event, [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ctypes.c_void_p], None),
+):
+    _fn.argtypes = _args
+    if _res is not None:
+        _fn.restype = _res
+_long = getattr(u32, 'GetWindowLongPtrW', None) or u32.GetWindowLongW
+_long.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_long.restype = ctypes.c_ssize_t
+if hasattr(u32, 'SwitchToThisWindow'):
+    u32.SwitchToThisWindow.argtypes = [ctypes.c_void_p, wintypes.BOOL]
 
 
 class NotFocused(RuntimeError):
@@ -407,7 +449,7 @@ def in_front():
     """Is Roblox in front? By handle: the Store version's window belongs to ApplicationFrameHost."""
     try:
         w = roblox_window()
-        return w is not None and foreground_hwnd() == w.hwnd
+        return w is not None and foreground_hwnd() == int(w.hwnd or 0)
     except Exception:
         return False
 
@@ -436,6 +478,7 @@ def wait_for_front(grace=3.0, take=True):
 
 
 INPUT_LOCK = threading.RLock()     # so another thread's combo (the clip key) isn't cut into
+PAUSED = threading.Event()          # set while the run is paused for the user; long input loops hold on it
 driving_until = 0.0                 # monotonic time until which input is the macro's, not the user's
 _seen_input = None
 
@@ -480,6 +523,15 @@ def user_took_over():
         return False
     _seen_input = tick
     return True
+
+
+def user_idle_seconds():
+    """Seconds since the last mouse or keyboard input anywhere on this PC."""
+    tick = _input_tick()
+    if not tick:
+        return 0.0
+    now = ctypes.windll.kernel32.GetTickCount()
+    return max(0.0, ((now - tick) & 0xFFFFFFFF) / 1000.0)
 
 
 def _send(vk, flags, sc=None):
@@ -785,19 +837,95 @@ def _minimised(w):
 
 
 def foreground_hwnd():
-    return u32.GetForegroundWindow() or 0
+    return int(u32.GetForegroundWindow() or 0)
 
 
-def force_foreground(hwnd):
+_HWND_TOPMOST, _HWND_NOTOPMOST = -1, -2
+_SWP_SHOW = 0x0001 | 0x0002 | 0x0040          # NOSIZE | NOMOVE | SHOWWINDOW
+_SWP_QUIET = 0x0001 | 0x0002 | 0x0010         # same, but do not activate
+_WS_EX_TOPMOST = 0x00000008
+_alt_front = 0.0
+
+
+def _exstyle(hwnd):
+    try:
+        return int(_long(ctypes.c_void_p(int(hwnd)), -20) or 0)
+    except Exception:
+        return 0
+
+
+def is_topmost(hwnd):
+    return bool(hwnd) and bool(_exstyle(hwnd) & _WS_EX_TOPMOST)
+
+
+def _place(hwnd, after, flags):
+    return bool(u32.SetWindowPos(ctypes.c_void_p(int(hwnd)), ctypes.c_void_p(after), 0, 0, 0, 0, flags))
+
+
+def force_foreground(hwnd, hold_top=False):
     """Bring hwnd to the front. Never AttachThreadInput: it can freeze both programs."""
-    user32 = ctypes.windll.user32
-    if user32.IsIconic(hwnd):
-        user32.ShowWindow(hwnd, 9)
-    user32.SetForegroundWindow(hwnd)
+    global _alt_front
+    hwnd = int(hwnd or 0)
+    if not hwnd:
+        return False
+    if u32.IsIconic(hwnd):
+        u32.ShowWindow(hwnd, 9)                     # SW_RESTORE
+    was_top = is_topmost(hwnd)
     if foreground_hwnd() == hwnd:
+        if hold_top and not is_topmost(hwnd):
+            _place(hwnd, _HWND_TOPMOST, _SWP_SHOW)
         return True
-    user32.SwitchToThisWindow(hwnd, True)          # what alt-tab uses
+    try:
+        u32.AllowSetForegroundWindow(0xFFFFFFFF)    # ASFW_ANY: this process may take the foreground
+    except Exception:
+        pass
+    u32.SetForegroundWindow(hwnd)
+    if foreground_hwnd() != hwnd:
+        now = time.monotonic()
+        if now - _alt_front >= 1.5:
+            _alt_front = now
+            # A short Alt tap is what releases Windows' foreground lock.
+            u32.keybd_event(0x12, 0, 0, 0)
+            u32.SetForegroundWindow(hwnd)
+            u32.keybd_event(0x12, 0, 0x0002, 0)
+    if foreground_hwnd() != hwnd:
+        try:
+            u32.SwitchToThisWindow(hwnd, True)
+        except Exception:
+            pass
+    if foreground_hwnd() != hwnd:
+        _place(hwnd, _HWND_TOPMOST, _SWP_SHOW)
+        u32.BringWindowToTop(hwnd)
+        u32.SetForegroundWindow(hwnd)
+    keep = hold_top or was_top
+    if keep and not is_topmost(hwnd):
+        _place(hwnd, _HWND_TOPMOST, _SWP_SHOW)
+    elif not keep and is_topmost(hwnd):
+        _place(hwnd, _HWND_NOTOPMOST, _SWP_SHOW)
     return foreground_hwnd() == hwnd
+
+
+def set_roblox_topmost(on):
+    """Pin Roblox above other windows, or put it back. True when a Roblox window was found."""
+    global _window
+    window = roblox_window()
+    hwnd = int(getattr(window, 'hwnd', 0) or 0) if window is not None else 0
+    if not hwnd or not u32.IsWindow(hwnd):
+        _window = (0.0, None)
+        window = roblox_window()
+        hwnd = int(getattr(window, 'hwnd', 0) or 0) if window is not None else 0
+    if not hwnd:
+        return False
+    if u32.IsIconic(hwnd):
+        u32.ShowWindow(hwnd, 9)
+    if on:
+        if not is_topmost(hwnd):
+            _place(hwnd, _HWND_TOPMOST, _SWP_SHOW)
+        if foreground_hwnd() != hwnd:
+            force_foreground(hwnd, hold_top=True)
+    elif is_topmost(hwnd):
+        _place(hwnd, _HWND_NOTOPMOST, _SWP_QUIET)
+    return True
 
 
 def focus_roblox(verify=True):
@@ -806,11 +934,12 @@ def focus_roblox(verify=True):
     if window is None:
         raise RuntimeError('No Roblox game window. Is it running and not minimised?')
     _window = (time.monotonic(), window)            # refresh what in_front() checks
-    if foreground_hwnd() == window.hwnd:
+    hwnd = int(window.hwnd or 0)
+    if foreground_hwnd() == hwnd:
         return window
-    force_foreground(window.hwnd)
+    force_foreground(hwnd)
     paced(SETTLE_S)
-    if verify and foreground_hwnd() != window.hwnd:
+    if verify and foreground_hwnd() != hwnd:
         raise RuntimeError('Roblox would not come forward (foreground is %s, wanted %s)'
                            % (foreground_hwnd(), window.hwnd))
     return window
@@ -829,6 +958,13 @@ def take_foreground(tries=5, gap=0.35):
         return roblox_window()
     print('   Roblox would not come to the front: %s' % last)
     return None
+
+
+def make_roblox_topmost():
+    """Pin Roblox above other windows and bring it forward. The window, or None."""
+    if not set_roblox_topmost(True):
+        return None
+    return roblox_window()
 
 
 FRONT_CLICK = 'merchantShopCloseButton'     # a dead spot, top right
@@ -1108,9 +1244,13 @@ def click(x, y, park=True, settle=MOVE_DELAY_S, travel=GLIDE_S):
 
 
 def close_guis():
-    """Shut the Inventory if it was left open."""
+    """Shut the Daily Rewards window and the Inventory if they were left open."""
     if ABORT or not steady_front():
         return False
+    try:
+        close_daily()
+    except Exception:
+        pass
     shut_by_sight()
     return True
 
@@ -1365,6 +1505,70 @@ def find_play():
 MENU_S = 90.0            # trust the title-screen flag this long; some clients never log the aura after Play
 
 
+def flash_warning_up():
+    """Sol's RNG opens with a black 'FLASH WARNING' screen you must click through.
+    True when most of the client is black with a little red in the middle."""
+    try:
+        box = client_box((0.0, 0.0, 1.0, 1.0))
+        img = grab(box).astype(np.int16)
+        h, w = img.shape[:2]
+        if h < 40 or w < 40:
+            return False
+        # sample a grid of the whole client: a flash-warning frame is almost all black
+        ys = np.linspace(0, h - 1, 12).astype(int)
+        xs = np.linspace(0, w - 1, 12).astype(int)
+        dark = (img[np.ix_(ys, xs)].max(axis=2) < 35).mean()
+        # red text sits in a band across the middle; scan it at full resolution
+        band = img[h * 2 // 5:h * 3 // 5, w // 5:w * 4 // 5]
+        red = ((band[:, :, 0] > 80) & (band[:, :, 0] > band[:, :, 1] + 30)).mean()
+        return dark > 0.80 and red > 0.0001
+    except Exception:
+        return False
+
+
+def skip_intro(stop=lambda: False, say=lambda m: None, attempts=3):
+    """Click through Sol's RNG's FLASH WARNING / intro screens after joining.
+
+    Waits 5 seconds after the flash warning appears, then clicks the "Click here
+    to skip" spot (bottom-centre, ~75% client height, centre-x). After every
+    click it checks whether the Play button is up: if it is, the intro is over
+    and it stops clicking. If Play is still not there, it waits and clicks again
+    (up to `attempts` times). Clicks are always spaced out, never simultaneous.
+    """
+    skipped = 0
+    for i in range(attempts):
+        if stop():
+            break
+        # 5s after the flash warning for the first click, then a real pause
+        # between later clicks so they are never fired at the same time.
+        for _ in range(int((5.0 if i == 0 else 3.0) * 10)):
+            if stop():
+                break
+            time.sleep(0.1)
+        if stop():
+            break
+        # Play visible means we are through the intro - no more clicks needed.
+        try:
+            if find_play() is not None:
+                break
+        except Exception:
+            pass
+        stored = load_points().get('skip_lower_centre')
+        if stored:
+            cx, cy = to_screen(stored)
+        else:
+            box = client_box((0.0, 0.0, 1.0, 1.0))
+            cx = (box[0] + box[2]) // 2          # centre horizontally
+            ch = box[3] - box[1]
+            # Known position: "Click here to skip" sits near the bottom of the loading screen.
+            cy = box[1] + int(ch * 0.75)
+        click(cx, cy, park=False, settle=0.3)
+        skipped += 1
+    if skipped:
+        say('clicked through the intro (%d)' % skipped)
+    return skipped
+
+
 def in_game(watch):
     """In game with a real aura? (_None_ shows on the title screen too.)"""
     on_menu = watch.in_menu and time.time() - getattr(watch, 'menu_at', time.time()) < MENU_S
@@ -1388,6 +1592,9 @@ def press_play(watch, stop=lambda: False, say=lambda m: None, timeout=90.0, play
         watch.poll()
         play_due, pressed = calibrated_play(watch, play_due, say)
         presses += pressed
+        # click through the FLASH WARNING before looking for Play, when Skip is on
+        if flash_warning_up() and load_settings().get('skip_intro', True):
+            skip_intro(stop=stop, say=say)
         at = find_play() if presses < PLAY_PRESSES else None
         if at is not None:
             gone = 0
@@ -1748,6 +1955,9 @@ FISH_POINTS = (
     ('fishingShopSellConfirmSellButton', 'Fish shop: Confirm'),
     ('fishingShopCloseButton', 'Fish shop: close (X)'),
 )
+SKIP_POINTS = (
+    ('skip_lower_centre', 'Skip intro: Click here to skip'),
+)
 MERCHANT_POINTS = (
     ('inventoryInvClose', 'Inventory: close (X)'),
     ('merchantShopSetToMaxButton', 'Merchant shop: Set to Max'),
@@ -1761,43 +1971,112 @@ DAILY_WAIT_S = 2.0       # for their window to show after rejoining
 
 
 DAILY_SHOW_S = 10.0      # how long its window may take to pop up after joining
+DAILY_CLAIM_S = 2.5      # the reward animation keeps the X disabled for a moment
+DAILY_CLOSE_TRIES = 6    # the X can eat a click or two while the panel fades
+
+
+def _daily_x(rgb=None):
+    """The close mark is a white X in the panel's top corner. A lit scene behind that
+    spot fails the cross test, so a plain world view can't pass for the window."""
+    if rgb is None:
+        import points
+        rgb = points.grab('dailyRewardsCloseButton')
+    if rgb is None or rgb.size == 0:
+        return False
+    a = rgb.astype(np.int16)
+    h, w = a.shape[:2]
+    if h < 8 or w < 8:
+        return False
+    bright = a.min(axis=2) > 160
+    frac = float(bright.mean())
+    if not 0.02 <= frac <= 0.45:
+        return False
+
+    def patch(y, x):
+        y0, y1 = max(0, y - 1), min(h, y + 2)
+        x0, x1 = max(0, x - 1), min(w, x + 2)
+        return float(bright[y0:y1, x0:x1].mean())
+
+    cy, cx = h // 2, w // 2
+    side = min(h, w)
+    if patch(cy, cx) < 0.3:
+        return False
+    for r in (max(3, side // 6), max(4, side // 5), max(5, side // 4)):
+        arms = [patch(cy + dy * r, cx + dx * r) for dy in (-1, 1) for dx in (-1, 1)]
+        gaps = [patch(cy + s * r, cx) for s in (-1, 1)] + [patch(cy, cx + s * r) for s in (-1, 1)]
+        # The panel frame can light one gap. Three dark wedges are still an X.
+        if min(arms) >= 0.2 and sorted(gaps)[2] <= 0.45:
+            return True
+    return False
+
+
+def daily_open(rgb=None):
+    """Is the Daily Rewards window up? The X or the Claim button is enough."""
+    if _daily_x(rgb):
+        return True
+    return rgb is None and daily_state() is not None
+
+
+def close_daily():
+    """Claim the daily reward if it is still available, then close the window.
+    True when a window was there."""
+    state = daily_state()
+    if state is None and not _daily_x():
+        return False
+    if state != 'claimed':
+        press_point('daily_claim', settle=1.2)
+        paced(DAILY_CLAIM_S)
+    for _ in range(DAILY_CLOSE_TRIES):
+        if daily_state() is None and not _daily_x():
+            return True
+        if not press_point('daily_close', settle=0.6):
+            break
+    return daily_state() is None and not _daily_x()
 
 
 def daily_state(rgb=None):
-    """'claim' (green Claim up), 'claimed' (Claim dimmed) or None (no window).
-    Once claimed, a dark cover dims Claim's green."""
+    """'claim' (Claim still live), 'claimed' (Claimed!) or None (no window).
+    The button is a dark plate with green lettering, or a solid green Claim."""
     if rgb is None:
         import points
         rgb = points.grab('dailyRewardsClaimButton')
     if rgb is None or rgb.size == 0:
         return None
     r, g, b = (rgb[..., i].astype(int) for i in range(3))
-    if (rgb.max(axis=2) < 45).mean() < 0.5:     # behind Claim, the dark cover leaves ~7% of the world
-        return None
-    greenish = (g - r > 40) & (g - b > 30) & (b >= r - 5)      # grass and leaves have less blue than red
-    if (greenish & (g > 200)).mean() > 0.03:
+    dark = float((rgb.max(axis=2) < 50).mean())
+    bright = float(((g - r > 35) & (g - b > 15) & (g > 170)).mean())
+    mid = float(((g - r > 25) & (g - b > 12) & (g > 90) & (g < 175)).mean())
+    if bright > 0.12:
         return 'claim'
-    if (greenish & (g > 90) & (g < 160)).mean() > 0.03:
+    if dark > 0.45 and bright > 0.04:
+        return 'claim'
+    if dark > 0.45 and mid > 0.02:
         return 'claimed'
     return None
 
 
-def daily_by_clicks(halt=stopped):
-    """Claim if the window shows a live Claim, then close it. False if no window came up."""
-    end = time.monotonic() + DAILY_SHOW_S
+def daily_by_clicks(halt=stopped, wait=DAILY_SHOW_S):
+    """Claim if the window shows a live Claim, then close it.
+    `wait` is how long to watch for the panel. 0 looks once.
+    Returns 'claim'/'claimed'/'closed' when handled, 'stuck' if it would not close, False if none came up."""
+    end = time.monotonic() + max(0.0, wait)
     state = daily_state()
-    while state is None and time.monotonic() < end and not halt():
-        paced(0.5)
+    while state is None and not _daily_x() and time.monotonic() < end and not halt():
+        paced(0.4)
         state = daily_state()
-    if state is None:
+    if state is None and not _daily_x():
         return False
-    if state == 'claim':
-        press_point('daily_claim', settle=1.5)
-    for _ in range(3):
-        press_point('daily_close', settle=0.6)
-        if daily_state() is None:
+    if state != 'claimed':
+        press_point('daily_claim', settle=1.2)
+        paced(DAILY_CLAIM_S if wait else 0.8)
+        state = state or 'claim'
+    for go in range(DAILY_CLOSE_TRIES):
+        if halt() or (go and not _daily_x() and daily_state() is None):
             break
-    return state
+        press_point('daily_close', settle=0.6)
+    if _daily_x() or daily_state() is not None:
+        return 'stuck'
+    return state or 'closed'
 
 
 def item_pass(say=print, terms=(BR, SC)):
@@ -1997,7 +2276,21 @@ def collection_open():
     return int((line.mean(axis=1) >= 0.8).sum()) >= 3
 
 
-after_align = None       # run once after the next camera squaring (daily rewards after joining)
+def exit_collection(halted=lambda: False):
+    """Close the Collection window if a missed click left it open. True when shut."""
+    if not collection_open():
+        return True
+    for _ in range(3):
+        if halted():
+            return False
+        press_point('exit_collection', settle=0.5)
+        if not collection_open():
+            return True
+    return not collection_open()
+
+
+after_align = None       # claim daily rewards once the camera is about to be squared
+before_respawn = None    # claim daily rewards before Esc resets the character and dismisses it
 align_fails = 0          # failed squarings in a row
 COLLECTION_EXTRA_S = 0.0 # adaptive extra settle added when a previous run had Collection issues
 
@@ -2007,6 +2300,10 @@ def align_camera(stop=lambda: False):
     global after_align, align_fails
     if stop() or take_foreground() is None:
         return False
+    # Collection dismisses the Daily Rewards panel, so claim it before that click.
+    if after_align and not stop():
+        go, after_align = after_align, None
+        go()
     if chat_open():
         print('   chat is open: turning it off before Collection')
         close_chat()
@@ -2040,9 +2337,6 @@ def align_camera(stop=lambda: False):
         if collection_open():
             print('   Collection would not shut')
             return False
-    if after_align and not stop():
-        go, after_align = after_align, None
-        go()
     return not stop()
 
 
@@ -2275,7 +2569,8 @@ def press_use(slot, settle=0.25, halt=stopped):
     """Pick search result `slot`, set the amount to 1, press Use. No waiting to see it taken."""
     if halt() or not press_point('slot%d' % (slot + 1), settle=settle):
         return False
-    use_one()
+    if not use_one():   # the last amount would still be in the box: Use could consume several
+        return False
     double = _searched in DOUBLE_USE
     if halt() or not press_point('use', settle=0.08 if double else 0.4):
         return False
@@ -2429,6 +2724,10 @@ def open_by_click(name, halted=lambda: False):
     global _side_open
     if _side_open == name and inventory_open():
         return True
+    try:
+        close_daily()                                   # its modal blocks every click underneath
+    except Exception:
+        pass
     close_inventory()                                   # close anything else that's up
     for _ in range(OPEN_TRIES):
         if halted() or not press_point(name, settle=0.4):

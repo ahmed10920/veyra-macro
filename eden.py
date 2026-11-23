@@ -105,13 +105,17 @@ def record(seconds, stop):
         frame = game.grab(game.client_box((0.0, 0.0, 1.0, 1.0)))
         h, w = frame.shape[:2]
         out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'XVID'), 20.0, (w, h))
-        end = time.time() + seconds
-        while time.time() < end and not stop():
-            frame = game.grab(game.client_box((0.0, 0.0, 1.0, 1.0)))
-            if frame.shape[:2] == (h, w):
-                out.write(cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_RGB2BGR))
-            time.sleep(1 / 20.0)
-        out.release()
+        try:
+            if not out.isOpened():
+                return                              # codec unavailable: no empty file to report
+            end = time.time() + seconds
+            while time.time() < end and not stop():
+                frame = game.grab(game.client_box((0.0, 0.0, 1.0, 1.0)))
+                if frame is not None and frame.shape[:2] == (h, w):
+                    out.write(cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_RGB2BGR))
+                time.sleep(1 / 20.0)
+        finally:
+            out.release()
     except Exception:
         pass
 

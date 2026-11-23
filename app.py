@@ -1,4 +1,5 @@
 from collections import Counter
+from datetime import datetime, timezone
 import base64
 import ctypes
 from ctypes import wintypes
@@ -197,12 +198,8 @@ def ensure_dependencies(prompt_fn=None):
             except OSError:
                 pass
     except Exception as e:
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            'Automatic installation failed:\n\n%s\n\nPlease check your internet connection or install manually.' % e,
-            'Veyra - Setup Failed',
-            0x10,
-        )
+        dark_message('Veyra - Setup Failed',
+                     'Automatic installation failed:\n\n%s\n\nPlease check your internet connection or install manually.' % e)
         return False
     return True
 
@@ -236,14 +233,13 @@ except Exception as e:          # numpy's DLLs raise OSError, not ImportError
             f.write('%s\n\nexe: %s\n' % (e, sys.executable))
     except OSError:
         pass
-    ctypes.windll.user32.MessageBoxW(0, 'The macro could not load one of its own files.\n\n%s\n\n'
-                                     'Most often an antivirus removed it, or the PC is out of memory:\n'
-                                     '  - add the macro to your antivirus exclusions and download it again\n'
-                                     '  - close other programs, then open it again\n%s\n'
-                                     'Send this message to Manas if it keeps happening.'
-                                     % (why, '  - on Windows N or KN, install the Media Feature Pack (Settings > Apps '
-                                        '> Optional features)\n' if 'DLL load failed' in why else ''),
-                                     'Veyra', 0x10)
+    dark_message('Veyra', 'The macro could not load one of its own files.\n\n%s\n\n'
+                 'Most often an antivirus removed it, or the PC is out of memory:\n'
+                 '  - add the macro to your antivirus exclusions and download it again\n'
+                 '  - close other programs, then open it again\n%s\n'
+                 'Send this message to Manas if it keeps happening.'
+                 % (why, '  - on Windows N or KN, install the Media Feature Pack (Settings > Apps '
+                    '> Optional features)\n' if 'DLL load failed' in why else ''))
     sys.exit(1)
 
 TEXT = '#f1f5f9'
@@ -257,7 +253,42 @@ BIOMES_DIR = os.path.join(HERE_DIR, 'biomes')
 os.makedirs(BIOMES_DIR, exist_ok=True)
 
 TITLE = 'Veyra'
-VERSION = '1.0'
+VERSION = '1.0.4'
+
+# Unified developer-mode passkey (baked into the .exe; session-only unlock).
+# Only the person who knows this key can open Developer Mode.
+DEVELOPER_PASSKEY = 'veyradevmode262010'
+
+
+def dark_message(title, message):
+    """Dark-themed message box — Windows MessageBoxW ignores the app theme."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.configure(bg='#0b0d12')
+        win.resizable(False, False)
+        win.attributes('-topmost', True)
+        w, h = 440, 180
+        x = (win.winfo_screenwidth() - w) // 2
+        y = (win.winfo_screenheight() - h) // 2
+        win.geometry('%dx%d+%d+%d' % (w, h, x, y))
+        tk.Label(win, text=message, bg='#0b0d12', fg='#ffffff', wraplength=390,
+                 justify='left', font=('Segoe UI', 10)).pack(padx=22, pady=22, expand=True)
+        btn = tk.Button(win, text='OK', width=10, bg='#1e293b', fg='#ffffff',
+                        activebackground='#334155', activeforeground='#ffffff',
+                        relief='flat', command=win.destroy)
+        btn.pack(pady=(0, 18))
+        win.transient(root)
+        win.grab_set()
+        btn.focus_set()
+        win.bind('<Return>', lambda _e: win.destroy())
+        win.wait_window()
+        root.destroy()
+    except Exception:
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x40)
 REPO_SLUG = os.environ.get('MMACRO_REPO') or 'ahmed10920/veyra-macro'
 RELEASE_PAGE = f'https://github.com/{REPO_SLUG}/releases'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or f'https://api.github.com/repos/{REPO_SLUG}/releases?per_page=5'
@@ -287,6 +318,7 @@ WATCH_EVERY = 0.5
 CRASH_WAITS = (30, 60, 120, 300)
 LOOK_EVERY_S = 1.5
 AFK_EVERY_S = 300
+PC_RESUME_IDLE_S = 10.0          # seconds without mouse/keyboard input before a PC pause auto-resumes
 EDEN_RETRY_S = 60
 EDEN_GIVE_UP_S = 30 * 60
 EDEN_AFK_REST_S = 900
@@ -301,8 +333,9 @@ DAILY_UTC_S = 22 * 3600 + 60
 DAILY_LATE_S = 90
 STRAY_EVERY_S = 20
 MERCHANT_REPEAT_S = 600
-BOSS_BIOMES = {'Boss': 'GRAVEYARD', 'Sinister P.': 'PUMPKIN MOON'}
+BOSS_BIOMES = {'Sinister S': 'GRAVEYARD', 'Sinister P.': 'PUMPKIN MOON'}
 BOSS_EARLY_S = 5
+BOSS_HERE_S = 180                  # how long a confirmed boss counts as present
 MERCHANT_TRIES = 3
 
 LOG_MAX = 4 << 20
@@ -347,8 +380,8 @@ def _note(tag, msg):
 CACHE_UNREADABLE = ('Roblox\'s cache (rbx-storage.db) could not be read, so merchants and the boss are not seen. Close '
                     'Roblox, delete the rbx-storage.db files in %LOCALAPPDATA%\\Roblox (Roblox makes them again) and '
                     'open Roblox normally, not as administrator.')
-STORE_ROBLOX = ('Merchant detection reads Roblox\'s cache (rbx-storage.db), which was not found on this PC. It works '
-                'with Roblox from roblox.com, Bloxstrap or Fishstrap.\n\nOpen Roblox once, or leave Merchant detection '
+STORE_ROBLOX = ('Merchant and boss detection read Roblox\'s cache (rbx-storage.db), which was not found on this PC. '
+                'It works with Roblox from roblox.com, Bloxstrap or Fishstrap.\n\nOpen Roblox once, or leave detection '
                 'off.')
 
 
@@ -433,7 +466,7 @@ def display_line(w):
 # ================================================================ Discord & Biomes
 # One application for every copy of Veyra. Users never create their own.
 DISCORD_APP_ID = '1540076645262565507'
-FOOTER = 'Join Manas Biome Support/Hunt Server'
+FOOTER = 'Download the latest Veyra release'
 TESTERS = ('Forsakened One', 'Daniel', 'Slpxy', 'Nova', 'imsomeone', 'Evil Talin Siran', 'ghost', '███\'█_Guest',
            'delta_likes_cats_xd')
 EMBED_GOOD, EMBED_BAD, EMBED_INFO, EMBED_BIOME, EMBED_GOLD = 0x57F287, 0xED4245, 0x8A8F98, 0x58B9FF, 0xFFD700
@@ -467,7 +500,40 @@ BIOME_RATES = {
 
 PING = {'GLITCH', 'GLITCHED', 'DREAMSPACE', 'CYBERSPACE'}
 CLIP_COLOURS = ((10 ** 10, 0xFFC94D), (10 ** 9, 0xB38CFF), (10 ** 8, 0x58B9FF), (1, EMBED_GOOD))
-MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6, 'Boss': 0x6A0DAD, 'Sinister P.': 0x6A0DAD}
+MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6, 'Sinister S': 0x6A0DAD, 'Sinister P.': 0xFF7A00}
+MERCHANT_BADGES = {'Rin': '🟠', 'Mari': '🟡', 'Jester': '🟣', 'Sinister S': '☠️', 'Sinister P.': '☠️'}
+MERCHANT_STATUS = {'Sinister S': 'BOSS SIGNAL LOCKED', 'Sinister P.': 'BOSS SIGNAL LOCKED'}
+MERCHANT_FACES = {'Rin': 'merchant_rin.png', 'Jester': 'merchant_jester.png', 'Mari': 'merchant_mari.png'}
+_merchant_icons = {}
+
+
+def merchant_icon(name=''):
+    """Bytes of that merchant's portrait (boss compass emblem for bosses), cached once."""
+    boss = name in BOSS_BIOMES
+    key = 'boss_alert.png' if boss else MERCHANT_FACES.get(name, 'merchant_tracker.png')
+    if key not in _merchant_icons:
+        folder = 'ui' if boss else os.path.join('ui', 'items')
+        try:
+            with open(os.path.join(HERE_DIR, folder, key), 'rb') as f:
+                _merchant_icons[key] = f.read()
+        except OSError:
+            _merchant_icons[key] = None
+    return _merchant_icons[key]
+
+
+def merchant_card(name, status='IN YOUR SERVER', action='TELEPORT ARMED'):
+    """The radar terminal strip that makes merchant posts instantly recognisable."""
+    width = 31
+    rows = [
+        '╔' + '═' * width + '╗',
+        '║' + ' VEYRA // MERCHANT RADAR '.center(width) + '║',
+        '╠' + '═' * width + '╣',
+        '║' + (' TARGET  : ' + (name or 'UNKNOWN').upper()).ljust(width)[:width] + '║',
+        '║' + (' STATUS  : ' + status).ljust(width)[:width] + '║',
+        '║' + (' ACTION  : ' + action).ljust(width)[:width] + '║',
+        '╚' + '═' * width + '╝',
+    ]
+    return '```\n' + '\n'.join(rows) + '\n```'
 
 
 def base_biome(name):
@@ -577,6 +643,17 @@ def clean_url(text):
     return ''.join((text or '').split())
 
 
+def _file_mime(name):
+    ext = os.path.splitext(name or '')[1].lower()
+    return {
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp',
+    }.get(ext, 'application/octet-stream')
+
+
 def _build_webhook_request(webhook_url, payload, files=None):
     """Build a urllib Request for JSON or multipart Discord webhook delivery."""
     if not files:
@@ -587,7 +664,7 @@ def _build_webhook_request(webhook_url, payload, files=None):
                 'Content-Type: application/json\r\n\r\n%s\r\n' % (b, json.dumps(payload))).encode('utf-8')
         for i, (name, png) in enumerate(files.items()):
             body += ('--%s\r\nContent-Disposition: form-data; name="files[%d]"; filename="%s"\r\n'
-                     'Content-Type: image/png\r\n\r\n' % (b, i, name)).encode('utf-8') + png + b'\r\n'
+                     'Content-Type: %s\r\n\r\n' % (b, i, name, _file_mime(name))).encode('utf-8') + png + b'\r\n'
         body += ('--%s--\r\n' % b).encode('utf-8')
         kind = 'multipart/form-data; boundary=' + b
     return urllib.request.Request(webhook_url, data=body,
@@ -597,6 +674,10 @@ def _build_webhook_request(webhook_url, payload, files=None):
 def _post(webhook_url, payload, files=None, on_error=None):
     """Posts on a thread; `files` {name: png} go as attachment://name."""
     err_cb = on_error or (lambda m: note('webhook', m))
+    payload.setdefault('components', [{
+        'type': 1,
+        'components': [{'type': 2, 'style': 5, 'label': 'Download Veyra', 'url': RELEASE_PAGE}],
+    }])
 
     def run():
         try:
@@ -624,11 +705,93 @@ _logo = []
 def logo_png():
     if not _logo:
         try:
-            with open(os.path.join(HERE_DIR, 'ui', 'brand_logo.png'), 'rb') as f:
+            with open(os.path.join(HERE_DIR, 'ui', 'brand_bh.png'), 'rb') as f:
                 _logo.append(f.read())
         except OSError:
             _logo.append(None)
     return _logo[0]
+
+
+_mark = []
+_mark_gif = []
+
+
+def mark_png():
+    """Finished intro mark, shown beside the run-summary author name."""
+    if not _mark:
+        try:
+            with open(os.path.join(HERE_DIR, 'ui', 'veyra-mark.png'), 'rb') as f:
+                _mark.append(f.read())
+        except OSError:
+            _mark.append(None)
+    return _mark[0]
+
+
+def mark_gif():
+    """Intro draw-on of the current mark. Discord animates this in the embed thumbnail."""
+    if not _mark_gif:
+        try:
+            with open(os.path.join(HERE_DIR, 'ui', 'veyra-anim.gif'), 'rb') as f:
+                _mark_gif.append(f.read())
+        except OSError:
+            _mark_gif.append(None)
+    return _mark_gif[0]
+
+
+def _summary_line(text, width=33):
+    return '║' + str(text)[:width].ljust(width) + '║'
+
+
+def _summary_stat(label, value, width=33):
+    left = ('  ' + label)[:12].ljust(12)
+    return _summary_line(left + str(value), width)
+
+
+def run_summary_card(player, length, ended, fish, points, merchants, bosses):
+    bar = '═' * 33
+    lines = [
+        '╔' + bar + '╗',
+        _summary_line('VEYRA // RUN SUMMARY'.center(33)),
+        '╠' + bar + '╣',
+        _summary_stat('PLAYER', player or '—'),
+        _summary_stat('LENGTH', length or '—'),
+        _summary_stat('ENDED', ended or '—'),
+        '╠' + bar + '╣',
+        _summary_stat('FISH', '{:,}'.format(int(fish))),
+        _summary_stat('POINTS', '{:,}'.format(int(points))),
+        _summary_stat('MERCHANTS', '{:,}'.format(int(merchants))),
+        _summary_stat('BOSSES', '{:,}'.format(int(bosses))),
+        '╚' + bar + '╝',
+    ]
+    return '```\n' + '\n'.join(lines) + '\n```'
+
+
+def post_run_summary(webhook_url, fish, points, merchants, bosses, player='', length='', ended='', server=''):
+    """Sky-blue run card. The thumbnail plays the intro draw-on of the current mark."""
+    if not webhook_url:
+        return
+    embed = {
+        'author': {'name': 'Veyra · Run Summary', 'url': RELEASE_PAGE},
+        'title': 'Run complete',
+        'description': run_summary_card(player, length, ended, fish, points, merchants, bosses)[:4000],
+        'color': 0x38BDF8,
+        'fields': [{'name': 'Private server', 'value': server_field(server), 'inline': False}],
+        'footer': {'text': 'Veyra · v%s' % VERSION},
+        'timestamp': _timestamp(),
+    }
+    files = {}
+    png = mark_png()
+    gif = mark_gif()
+    if png:
+        files['logo.png'] = png
+        embed['author']['icon_url'] = 'attachment://logo.png'
+    if gif:
+        files['veyra.gif'] = gif
+        embed['thumbnail'] = {'url': 'attachment://veyra.gif'}
+    elif png:
+        files['brandthumb.png'] = png
+        embed['thumbnail'] = {'url': 'attachment://brandthumb.png'}
+    _post(webhook_url, {'embeds': [embed]}, files)
 
 
 def server_field(link):
@@ -641,24 +804,35 @@ def server_field(link):
 
 
 def post_event(webhook_url, title, description='', colour=EMBED_INFO, area='Macro', fields=(), ping='', shot=None,
-               footer=True, thumb=None):
+               footer=True, thumb=None, merchant=None):
     if not webhook_url:
         return
-    embed = {'author': {'name': 'Veyra · %s' % area, 'url': INVITE}, 'title': title[:256], 'color': colour,
-             'timestamp': _timestamp()}
+    radar = area == 'Merchant' or bool(merchant)
+    embed = {'author': {'name': 'Veyra · %s' % area, 'url': RELEASE_PAGE},
+             'title': title[:256], 'color': colour, 'timestamp': _timestamp()}
     files = {}
     if logo_png():
         files['logo.png'] = logo_png()
         embed['author']['icon_url'] = 'attachment://logo.png'
+    if radar:
+        description = '```diff\n- MERCHANT RADAR // EVENT LOG\n```\n' + (description or '')
     if description:
         embed['description'] = description[:4000]
     if footer:
-        fields = list(fields) + [('​', '-# [%s](%s)' % (FOOTER, INVITE), False)]
+        fields = list(fields) + [(' ', '-# Veyra · v%s' % VERSION, False)]
     if fields:
         embed['fields'] = [{'name': n, 'value': str(v)[:1024] or '-', 'inline': i} for n, v, i in fields]
     if thumb:
         files['biome.png'] = thumb
         embed['thumbnail'] = {'url': 'attachment://biome.png'}
+    elif not radar and logo_png():
+        files['brandthumb.png'] = logo_png()
+        embed['thumbnail'] = {'url': 'attachment://brandthumb.png'}
+    elif radar:
+        icon = merchant_icon(merchant or '')
+        if icon:
+            files['merchant.png'] = icon
+            embed['image' if not shot else 'thumbnail'] = {'url': 'attachment://merchant.png'}
     if shot:
         files['shot.png'] = shot
         embed['image'] = {'url': 'attachment://shot.png'}
@@ -716,28 +890,142 @@ def post_biome(webhook_url, name, ping=True, server='', running=None, here=None,
         _post(webhook_url, payload, files)
 
 
-def post_merchant(webhook_url, name, server=''):
-    title = {'Boss': 'Sinister S. has spawned', 'Sinister P.': 'Sinister P. has spawned'}.get(
-        name, 'Merchant Arrived - %s' % name)
-    post_event(webhook_url, title, 'Found <t:%d:R>' % time.time(),
-               MERCHANT_COLOURS.get(name, EMBED_GOLD), 'Merchant', [('Private server', server_field(server), True)],
-               footer=False)
+def post_merchant(webhook_url, name, server='', watch=None, collect=False, how=''):
+    """Merchant arrival: the radar-terminal card with that merchant's own logo."""
+    if not webhook_url:
+        return
+    badge = '' if name == 'Sinister S' else MERCHANT_BADGES.get(name, '')
+    status = MERCHANT_STATUS.get(name, 'MERCHANT SIGNAL LOCKED')
+    colour = MERCHANT_COLOURS.get(name, EMBED_GOLD)
+    now = int(time.time())
+    action = 'TELEPORT ARMED' if collect else 'ALERT ONLY'
+    title = 'Sinister boss has arrived in Graveyard' if name == 'Sinister S' else 'Sinister boss has arrived in Pumpkin Moon' if name == 'Sinister P.' else '%s %s' % (badge, status)
+    description = '\n'.join([
+        merchant_card(name, 'IN YOUR SERVER', action),
+        '',
+        '%s**%s** is here  ·  <t:%d:R>  ·  <t:%d:t>' % ((badge + ' ') if badge else '', name, now, now),
+        ('-# Detected via %s' % how) if how else '-# Detected by the Merchant Radar',
+    ])
+    fields = [('Signal', 'Locked onto the server', True),
+              ('Route', 'Teleport → Shop → Buy' if collect else 'Alert only', True),
+              ('Private Server', server_field(server), False)]
+    embed = {
+        'author': {'name': 'Veyra · Merchant Radar', 'url': RELEASE_PAGE},
+        'title': title,
+        'description': description[:4000],
+        'color': colour,
+        'fields': [{'name': n, 'value': str(v)[:1024] or '-', 'inline': i} for n, v, i in fields],
+        'footer': {'text': 'Veyra · v%s' % VERSION},
+        'timestamp': _timestamp(),
+    }
+    files = {}
+    if logo_png():
+        files['logo.png'] = logo_png()
+        embed['author']['icon_url'] = 'attachment://logo.png'
+    icon = merchant_icon(name)
+    if icon:
+        files['merchant.png'] = icon
+        embed['image'] = {'url': 'attachment://merchant.png'}
+    _post(webhook_url, {'embeds': [embed]}, files)
 
 
-def post_shot(webhook_url, title, colour, ping='', detail='', area='Macro', fields=()):
+def post_shot(webhook_url, title, colour, ping='', detail='', area='Macro', fields=(), merchant=None):
     if not webhook_url:
         return
     buf = io.BytesIO()
     Image.fromarray(game.grab(game.client_box((0.0, 0.0, 1.0, 1.0)))).save(buf, 'PNG')
-    post_event(webhook_url, title, detail, colour, area, fields, mention(ping), buf.getvalue())
+    post_event(webhook_url, title, detail, colour, area, fields, mention(ping), buf.getvalue(), merchant=merchant)
+
+
+_asset_cache = {}
+
+
+def asset_png(name):
+    """Bytes of an icon under ui/items, cached after first read."""
+    if name not in _asset_cache:
+        try:
+            with open(os.path.join(HERE_DIR, 'ui', 'items', name), 'rb') as f:
+                _asset_cache[name] = f.read()
+        except OSError:
+            _asset_cache[name] = None
+    return _asset_cache[name]
+
+
+def _screen_shot():
+    """Current Roblox screen as PNG bytes, or None when the capture is unavailable."""
+    try:
+        buf = io.BytesIO()
+        Image.fromarray(game.grab(game.client_box((0.0, 0.0, 1.0, 1.0)))).save(buf, 'PNG')
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def post_alert(webhook_url, title, detail, colour, area, icon, emoji=''):
+    """Small alert card with its own icon and a screenshot of the failure."""
+    if not webhook_url:
+        return
+    embed = {
+        'author': {'name': 'Veyra · %s' % area, 'url': RELEASE_PAGE},
+        'title': ('%s %s' % (emoji, title)) if emoji else title,
+        'description': detail or '-',
+        'color': colour,
+        'footer': {'text': 'Veyra · v%s' % VERSION},
+        'timestamp': _timestamp(),
+    }
+    files = {}
+    if logo_png():
+        files['logo.png'] = logo_png()
+        embed['author']['icon_url'] = 'attachment://logo.png'
+    blob = asset_png(icon)
+    if blob:
+        files['alert.png'] = blob
+        embed['thumbnail'] = {'url': 'attachment://alert.png'}
+    shot = _screen_shot()
+    if shot:
+        files['shot.png'] = shot
+        embed['image'] = {'url': 'attachment://shot.png'}
+    _post(webhook_url, {'embeds': [embed]}, files)
+
+
+_STATUS_ICONS = {'Macro started': '▶️', 'Macro stopped': '⏹️', 'Reconnecting': '🔄',
+                 'Rejoined the private server': '✅', 'Could not rejoin': '⚠️'}
+
+
+def post_status(webhook_url, title, detail='', colour=EMBED_INFO, area='Macro', username='', logo=False):
+    """Start/stop/reconnect get a status card instead of the plain text embed."""
+    if not webhook_url:
+        return
+    lines = []
+    if username:
+        lines.append('👤 **%s**' % username)
+    if detail:
+        lines.append(detail)
+    if not lines:
+        lines.append('Veyra is %s.' % ('running now' if colour == EMBED_GOOD else 'no longer running'))
+    embed = {
+        'author': {'name': 'Veyra · %s' % area, 'url': RELEASE_PAGE},
+        'title': '%s %s' % (_STATUS_ICONS.get(title, '🔔'), title),
+        'description': '\n'.join(lines)[:4000],
+        'color': colour,
+        'footer': {'text': 'Veyra · v%s' % VERSION},
+        'timestamp': _timestamp(),
+    }
+    files = {}
+    if logo_png():
+        files['logo.png'] = logo_png()
+        embed['author']['icon_url'] = 'attachment://logo.png'
+        if logo:
+            files['veyra.png'] = logo_png()
+            embed['image'] = {'url': 'attachment://veyra.png'}
+    _post(webhook_url, {'embeds': [embed]}, files)
 
 
 def append_history(biome):
     try:
-        os.makedirs(os.path.dirname(game.HISTORY_FILE), exist_ok=True)
-        with open(game.HISTORY_FILE, 'a', encoding='utf-8') as f:
-            f.write(json.dumps({'ts': time.time(), 'time': time.strftime('%Y-%m-%d %H:%M:%S'), 'biome': biome}) + '\n')
-    except OSError:
+        import local_db
+        local_db.add_history(time.time(), time.strftime('%Y-%m-%d %H:%M:%S'), biome)
+    except Exception:
         pass
 
 
@@ -787,7 +1075,7 @@ def resolve_avatar_file(uid=''):
         candidates.append(os.path.join(game.APP_DIR, 'avatar_%s.png' % uid))
     candidates.extend([
         os.path.join(game.APP_DIR, 'avatar.png'),
-        os.path.join(HERE_DIR, 'ui', 'brand_logo.png'),
+        os.path.join(HERE_DIR, 'ui', 'brand_bh.png'),
     ])
     for p in candidates:
         if p and os.path.isfile(p):
@@ -934,6 +1222,14 @@ def normalize_cfg(raw):
     cfg = dict(game.DEFAULTS)
     if isinstance(raw, dict):
         cfg.update(raw)
+    cfg.setdefault('silent_merchant', False)
+    cfg.setdefault('boss_on', False)
+    cfg.setdefault('roblox_on_top', False)
+    cfg.setdefault('skip_intro', True)
+    # Older builds used one switch for merchants and Halloween bosses. Keep bosses
+    # on for anyone who already had that switch on, until they turn the new one off.
+    if isinstance(raw, dict) and 'boss_on' not in raw:
+        cfg['boss_on'] = bool(raw.get('merchant_on'))
     cfg.setdefault('rune_on', False)
     cfg.setdefault('rune_biomes', list(RUNE_BIOMES))
     cfg.setdefault('rune_after', 0)
@@ -969,6 +1265,7 @@ def normalize_cfg(raw):
 class MacroEngine:
     def __init__(self):
         self.running = False
+        self.paused = False
         self.phase_text = 'idle'
         self.biome_stop = None
         self._last_hotkey = {}
@@ -979,6 +1276,8 @@ class MacroEngine:
         self._preview_biome = None
         self._support = None
         self._support_lock = threading.Lock()
+        # Developer Mode: locked at the start of every session (session-only unlock).
+        self.developer_locked = True
         self.update_info = {'state': 'idle', 'msg': 'Up to date (v%s)' % VERSION, 'progress': 0, 'latest': VERSION}
         self.url = ''
         self.use_items = False
@@ -998,6 +1297,7 @@ class MacroEngine:
         self.rejoining = False
         self.watch = None
         self.merchant_detect = False
+        self.boss_detect = False
         self.block_on = False
         self.blocked = {}
         self.block_path = None
@@ -1007,6 +1307,17 @@ class MacroEngine:
         self.merchant_at = 0.0
         self._merchant_posted = {}
         self._boss_seen = {}
+        self._boss_here = {}                 # boss -> last confirmed presence (monotonic)
+        self._stats_fish = 0                 # this session only; the webhook posts these
+        self._stats_merchants = 0
+        self._stats_bosses = 0
+        self._stats_points = 0               # fish points/coins earned from sales this session
+        self._life = {'fish': 0, 'points': 0, 'merchants': 0, 'bosses': 0}
+        self._life_epoch = 0
+        self._life_done_epoch = -1
+        self._points_live = None          # on-screen fish points; the card shows this, not a sum of sales
+        self._points_suspect = None
+        self._load_lifetime()
         self.collect = False
         self.wanted = {}
         self.collect_names = set()
@@ -1045,6 +1356,9 @@ class MacroEngine:
         self.run_id = 0
         self.cache_bust = 1
         self._history = []
+        self._hist_ts = 0.0
+        self._hist_biome = None
+        self._visit_keys = set()
         self._log_hist = []
         self._log_hist_path = None
         self._log_hist_pos = 0
@@ -1053,33 +1367,48 @@ class MacroEngine:
         self._window = None
         self._toast = ToastService()
 
-        self.block_on = bool(self.cfg.get('merchant_on'))
+        self._sync_detect()
         self.wanted = self.wanted_items()
         self.pop_list = self.pop_items()
 
         try:
-            if os.path.exists(game.HISTORY_FILE):
-                with open(game.HISTORY_FILE, 'r', encoding='utf-8', errors='replace') as f:
-                    all_rows = []
-                    for line in f:
-                        s = line.strip()
-                        if not s:
-                            continue
-                        try:
-                            item = json.loads(s)
-                        except Exception:
-                            continue
-                        b = base_biome(item.get('biome') or 'NORMAL') or 'NORMAL'
-                        self._biome_counts[b] += 1
-                        all_rows.append(item)
-                for item in all_rows[-50:]:
-                    b = (item.get('biome') or 'NORMAL').upper()
-                    t_full = item.get('time', '')
-                    t_short = t_full.split(' ')[-1] if ' ' in t_full else (t_full or '--:--:--')
-                    self._history.append({'biome': b, 'time': t_short})
-                if all_rows:
-                    self.biome_now = (all_rows[-1].get('biome') or 'NORMAL').upper()
-                self.rares_count = sum(v for k, v in self._biome_counts.items() if is_rare(k))
+            import local_db
+            all_rows = local_db.history(200)
+            if not all_rows:
+                # one-time import of the old history.jsonl
+                if os.path.exists(game.HISTORY_FILE):
+                    with open(game.HISTORY_FILE, 'r', encoding='utf-8', errors='replace') as f:
+                        for line in f:
+                            s = line.strip()
+                            if not s:
+                                continue
+                            try:
+                                item = json.loads(s)
+                            except Exception:
+                                continue
+                            local_db.add_history(item.get('ts') or 0, item.get('time', ''),
+                                                  item.get('biome') or 'NORMAL', item.get('day') or '')
+                    all_rows = local_db.history(200)
+            for biome, n in local_db.history_counts().items():
+                b = base_biome(biome or 'NORMAL') or 'NORMAL'
+                self._biome_counts[b] += int(n)
+            self._hist_ts, last_saved = local_db.latest_history()
+            self._hist_biome = base_biome(last_saved) if last_saved else None
+            for ts, biome in local_db.history_times():
+                b = base_biome(biome or '') or ''
+                try:
+                    if b:
+                        self._visit_keys.add((b, int(float(ts))))
+                except (TypeError, ValueError):
+                    pass
+            for item in all_rows[-50:]:
+                b = (item.get('biome') or 'NORMAL').upper()
+                t_full = item.get('time', '')
+                t_short = t_full.split(' ')[-1] if ' ' in t_full else (t_full or '--:--:--')
+                self._history.append({'biome': b, 'time': t_short})
+            if all_rows:
+                self.biome_now = (all_rows[-1].get('biome') or 'NORMAL').upper()
+            self.rares_count = sum(v for k, v in self._biome_counts.items() if is_rare(k))
         except Exception:
             pass
         self._sync_live_roblox_log(initial=True)
@@ -1093,8 +1422,32 @@ class MacroEngine:
         threading.Thread(target=self._poll_hotkeys, daemon=True).start()
         threading.Thread(target=self._watch_user_pc, daemon=True).start()
         threading.Thread(target=self._poll_live_telemetry, daemon=True).start()
+        threading.Thread(target=self._poll_fish_points, daemon=True).start()
         threading.Thread(target=self._autosave_loop, daemon=True).start()
         threading.Thread(target=self._fetch_auras, daemon=True).start()
+        threading.Thread(target=self._watch_roblox_top, daemon=True).start()
+
+    def _sync_detect(self):
+        """Merchant detection and Halloween boss detection are separate switches."""
+        self.merchant_detect = self.cfg_bool('merchant_on')
+        self.boss_detect = self.cfg_bool('boss_on')
+        self.block_on = self.merchant_detect or self.boss_detect
+
+    def _watch_roblox_top(self):
+        """While Keep Roblox on top is on, pin the game above other windows and pull it forward."""
+        pinned = False
+        while not self._closing:
+            time.sleep(0.45)
+            try:
+                want = self.cfg_bool('roblox_on_top') and not self.paused and not self._closing
+                if want:
+                    if game.set_roblox_topmost(True):
+                        pinned = True
+                elif pinned:
+                    game.set_roblox_topmost(False)
+                    pinned = False
+            except Exception:
+                pass
 
     def _autosave_loop(self):
         last_snap = None
@@ -1252,6 +1605,10 @@ class MacroEngine:
                     'anti_afk': self.cfg_bool('anti_afk', True),
                     'yield_pc': self.cfg_bool('yield_pc', True),
                     'merchant_on': self.cfg_bool('merchant_on'),
+                    'boss_on': self.cfg_bool('boss_on'),
+                    'roblox_on_top': self.cfg_bool('roblox_on_top'),
+                    'skip_intro': self.cfg_bool('skip_intro', True),
+                    'silent_merchant': self.cfg_bool('silent_merchant'),
                     'webhook_url': clean_url(self.cfg_str('webhook_url')),
                     'private_server': game.tidy_link(self.cfg_str('private_server')),
                     'auto_reconnect': self.cfg_bool('auto_reconnect'),
@@ -1366,16 +1723,19 @@ class MacroEngine:
             name = name.upper()
             if name == last:
                 continue
-            when = game.time_from_line(line) or time.time()
-            local = time.localtime(when)
+            when = game.time_from_line(line)
+            shown = when or time.time()
+            local = time.localtime(shown)
             day = time.strftime('%Y-%m-%d', local)
             added.append({
                 'biome': name,
                 'time': time.strftime('%H:%M:%S', local),
                 'day': '' if day == today else time.strftime('%b %d', local),
-                'ts': when,
+                'ts': shown,
+                'logged': when,
             })
             last = name
+        saved = self._save_logged_biomes(added) if self.running else 0
         with self._lock:
             if path != self._log_hist_path:
                 return
@@ -1384,6 +1744,82 @@ class MacroEngine:
                 self._log_hist.extend(added)
                 if len(self._log_hist) > 120:
                     del self._log_hist[:60]
+        if saved:
+            note('biomes', 'synced %d biome visit%s from the Roblox log' % (saved, '' if saved == 1 else 's'))
+
+    def _biomes_in_log(self, path):
+        """Biome changes in one Roblox log, in order."""
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+        except OSError:
+            return []
+        added, last = [], None
+        today = time.strftime('%Y-%m-%d')
+        for line in data.decode('utf-8', errors='replace').splitlines():
+            name = game.biome_from_line(line)
+            if not name:
+                continue
+            name = name.upper()
+            if name == last:
+                continue
+            when = game.time_from_line(line)
+            shown = when or time.time()
+            local = time.localtime(shown)
+            day = time.strftime('%Y-%m-%d', local)
+            added.append({
+                'biome': name,
+                'time': time.strftime('%H:%M:%S', local),
+                'day': '' if day == today else time.strftime('%b %d', local),
+                'ts': shown,
+                'logged': when,
+            })
+            last = name
+        return added
+
+    def _sync_biomes_from_log(self):
+        """Pull biome visits from the current Roblox log. Used when the macro starts."""
+        path = game.newest_log()
+        if not path:
+            return 0
+        saved = self._save_logged_biomes(self._biomes_in_log(path))
+        if saved:
+            note('biomes', 'synced %d biome visit%s from the Roblox log' % (saved, '' if saved == 1 else 's'))
+        return saved
+
+    def _save_logged_biomes(self, items):
+        """Add Roblox-log biome visits that are not already saved. A visit saved by an
+        older build has a timestamp a second or two off the log line, so those match too."""
+        import local_db
+        saved = 0
+        for item in items:
+            when = item.get('logged')
+            if when is None:
+                continue
+            name = base_biome(item.get('biome') or '') or (item.get('biome') or '').upper()
+            if not name:
+                continue
+            sec = int(when)
+            with self._lock:
+                if any((name, sec + delta) in self._visit_keys for delta in (-2, -1, 0, 1, 2)):
+                    continue
+            local = time.localtime(when)
+            day = time.strftime('%Y-%m-%d', local)
+            today = time.strftime('%Y-%m-%d')
+            try:
+                local_db.add_history(when, time.strftime('%Y-%m-%d %H:%M:%S', local), name,
+                                     '' if day == today else time.strftime('%b %d', local))
+            except Exception:
+                continue
+            with self._lock:
+                self._visit_keys.add((name, sec))
+                self._hist_ts = max(self._hist_ts, when)
+                self._hist_biome = name
+                self._biome_counts[name] += 1
+                if is_rare(name):
+                    self.rares_count += 1
+            saved += 1
+        return saved
 
     def _poll_live_telemetry(self):
         while not self._closing:
@@ -1403,8 +1839,19 @@ class MacroEngine:
         self._biome_since = time.time()
         return True
 
+    def presence_mode(self):
+        """What the macro is doing right now, for Discord: Fishing / Eden / both / Idle."""
+        if not self.running:
+            return 'Idle'
+        modes = []
+        if getattr(self, 'fisher', None) is not None or self.cfg_bool('fish_on'):
+            modes.append('Fishing')
+        if self.cfg_bool('eden_on') or getattr(self, 'crack_on', False):
+            modes.append('Eden')
+        return ' + '.join(modes) if modes else 'Idle'
+
     def refresh_discord(self):
-        """Push the current biome to Discord Rich Presence."""
+        """Push the current biome, mode and run status to Discord Rich Presence."""
         presence = getattr(self, 'presence', None)
         if presence is None:
             return
@@ -1414,36 +1861,54 @@ class MacroEngine:
             if not enabled:
                 presence.set_activity(None)
                 return
+            if not getattr(self, 'developer_locked', True):
+                presence.set_activity({
+                    'details': 'Veyra Macro\nMode: Developer',
+                    'state': 'Status: Developer Mode\nPasskey-locked session',
+                    'buttons': [{'label': '🌌 Download Veyra Macro', 'url': RELEASE_PAGE}],
+                    'assets': {
+                        'large_image': 'macro_logo',
+                        'large_text': 'Developer Mode',
+                        'small_image': 'macro_logo',
+                        'small_text': 'Developer',
+                    },
+                })
+                return
             if not self.running:
                 presence.set_activity({
-                    'details': 'Veyra',
-                    'state': 'Not running',
+                    'details': 'Veyra Macro\nMode: Idle',
+                    'state': 'Status: Ready\nPress Start in the app to begin',
+                    'buttons': [{'label': '🌌 Download Veyra Macro', 'url': RELEASE_PAGE}],
                     'assets': {
-                        'large_image': 'veyra',
-                        'large_text': 'Veyra',
+                        'large_image': 'macro_logo',
+                        'large_text': 'Veyra Macro',
+                        'small_image': 'macro_logo',
+                        'small_text': 'Idle',
                     },
                 })
                 return
             biome = base_biome(self.biome_now or 'NORMAL') or 'NORMAL'
-            label = pretty(biome) or 'Normal'
             aura = self.aura_logged[0] if self.aura_logged and self.aura_logged[0] not in (None, '', '_None_') else ''
-            if aura:
-                state = 'Equipped "%s"' % aura
-            elif self.running:
-                state = 'Macro running'
-            else:
-                state = "Sol's RNG"
             slug = biome_slug(biome) or 'normal'
             if slug == 'sand_storm':
                 slug = 'sandstorm'
+            details = 'Mode: %s' % self.presence_mode()
+            state_lines = []
+            if aura:
+                state_lines.append('Aura: %s' % aura)
+            state_lines.append('Server: %d/%d players' % (
+                self.cfg_int('server_players', 1, 1), self.cfg_int('server_slots', 20, 1)))
+            state_lines.append('Status: %s' % ('Paused' if self.paused else 'Running'))
             presence.set_activity({
-                'details': label,
-                'state': state,
-                'timestamps': {'start': int(getattr(self, '_biome_since', time.time()))},
+                'details': details,
+                'state': '\n'.join(state_lines),
+                'timestamps': {'start': int(self.run_wall or time.time())},
+                'buttons': [{'label': '🌌 Download Veyra Macro', 'url': RELEASE_PAGE}],
                 'assets': {
                     'large_image': slug,
-                    'large_text': label,
-                    'small_text': 'Veyra',
+                    'large_text': 'Biome: %s' % (pretty(biome) or 'Normal'),
+                    'small_image': 'macro_logo',
+                    'small_text': ('Aura: %s' % aura) if aura else 'Veyra Macro',
                 },
             })
         except Exception as e:
@@ -1470,6 +1935,111 @@ class MacroEngine:
             'lite': lite,
             'fx': self.cfg_bool('fx_on', True) and not lite,
         }
+
+    def _lifetime_path(self):
+        return os.path.join(game.APP_DIR, 'lifetime.json')
+
+    def _load_lifetime(self):
+        try:
+            with open(self._lifetime_path(), encoding='utf-8') as f:
+                raw = json.load(f)
+        except (OSError, ValueError, TypeError):
+            return
+        if not isinstance(raw, dict):
+            return
+        for key in self._life:
+            try:
+                self._life[key] = max(0, int(raw.get(key) or 0))
+            except (TypeError, ValueError):
+                self._life[key] = 0
+
+    def _save_lifetime(self, payload=None):
+        try:
+            os.makedirs(game.APP_DIR, exist_ok=True)
+            with open(self._lifetime_path(), 'w', encoding='utf-8') as f:
+                json.dump(self._life if payload is None else payload, f)
+        except OSError as e:
+            note('stats', 'could not save all-time stats: %s' % e)
+
+    def _flush_shown(self):
+        """Write the all-time total, including this open session, without folding it twice."""
+        with self._lock:
+            shown = self._shown_stats()
+        self._save_lifetime(shown)
+
+    def _session_totals(self):
+        """Counts for the open monitoring session. The webhook sends these, not the all-time totals."""
+        return {
+            'fish': self._stats_fish + (self.fisher.caught if self.fisher else 0),
+            'points': self._stats_points + (self.fisher.points_earned if self.fisher else 0),
+            'merchants': self._stats_merchants,
+            'bosses': self._stats_bosses,
+        }
+
+    def _shown_stats(self):
+        sess = self._session_totals()
+        shown = {key: int(self._life.get(key, 0)) + int(sess[key]) for key in self._life}
+        # Fish points is the balance in the corner of the game. Sale deltas miss catches
+        # the reader skipped, so adding them drifts away from the number on screen.
+        if self._points_live is not None:
+            shown['points'] = int(self._points_live)
+        return shown
+
+    def _set_fish_points(self, balance):
+        """Remember the fish-points balance read off the game window."""
+        try:
+            balance = int(balance)
+        except (TypeError, ValueError):
+            return
+        if balance < 0:
+            return
+        with self._lock:
+            prev = self._points_live if self._points_live is not None else int(self._life.get('points') or 0)
+            # A read of the coins line, or the small counter under fish points, is a different number.
+            if prev > 0 and (balance > prev * 3 or balance * 3 < prev):
+                if self._points_suspect != balance:
+                    self._points_suspect = balance
+                    return
+            if self._points_live == balance:
+                self._points_suspect = None
+                return
+            self._points_suspect = None
+            self._points_live = balance
+            self._life['points'] = balance
+            self._save_lifetime()
+
+    def _poll_fish_points(self):
+        while not self._closing:
+            try:
+                got = fishing.read_fish_points()
+                if got is not None:
+                    self._set_fish_points(got)
+            except Exception:
+                pass
+            for _ in range(8):
+                if self._closing:
+                    return
+                time.sleep(0.5)
+
+    def _commit_lifetime(self, epoch=None):
+        """Add this session onto the saved all-time totals once the session is over."""
+        with self._lock:
+            if epoch is None:
+                epoch = self._life_epoch
+            if epoch != self._life_epoch or epoch == self._life_done_epoch:
+                return
+            live = self._points_live
+            for key, value in self._session_totals().items():
+                if key == 'points' and live is not None:
+                    self._life['points'] = int(live)
+                    continue
+                self._life[key] = int(self._life.get(key, 0)) + int(value)
+            self._stats_fish = self._stats_merchants = self._stats_bosses = self._stats_points = 0
+            if self.fisher is not None:
+                self.fisher.caught = 0
+                self.fisher.points_earned = 0
+            self._life_done_epoch = epoch
+            self._save_lifetime()
 
     def build_state(self):
         with self._lock:
@@ -1529,6 +2099,7 @@ class MacroEngine:
             return {
                 'cfg': json.loads(json.dumps(self.cfg)),
                 'running': self.running,
+                'paused': self.paused,
                 'phase': self.phase_text,
                 'uptime': uptime,
                 'player_name': self.player_name,
@@ -1541,6 +2112,7 @@ class MacroEngine:
                 'biome_rgb': '%d, %d, %d' % (r, g, b),
                 'biome_img': biome_web_path(bnow),
                 'rares_count': self.rares_count,
+                'run_stats': self._shown_stats(),
                 'biome_counts': biome_counts,
                 'biome_counts_total': biome_counts_total,
                 'aura_now': (self.aura_logged[0] if self.aura_logged[0] and self.aura_logged[0] != '_None_' else ''),
@@ -1554,6 +2126,7 @@ class MacroEngine:
                 'logs': logs,
                 'support': supp,
                 'version': VERSION,
+                'developer_locked': self.developer_locked,
                 'update_info': dict(self.update_info),
                 'discord_status': self.presence.status() if self.presence is not None else {'status': 'off', 'detail': ''},
                 'pc': self.pc_info(),
@@ -1651,8 +2224,8 @@ class MacroEngine:
     def start_biomes(self, url):
         if self.biome_stop is not None and not self.biome_stop.is_set():
             return
-        if not (url.startswith('https://') or self.merchant_detect or self.clipper or self.equip_aura or self.rune_biomes
-                or self.selector_biome or self.pop_biomes):
+        if not (url.startswith('https://') or self.merchant_detect or self.boss_detect or self.clipper
+                or self.equip_aura or self.rune_biomes or self.selector_biome or self.pop_biomes):
             return
         self.biome_stop = threading.Event()
         threading.Thread(target=self._watch_biomes, args=(url,), daemon=True).start()
@@ -1661,7 +2234,8 @@ class MacroEngine:
         cfg = game.load_settings()
         stop = self.biome_stop
         failed = None
-        post_event(url, 'Macro started', '', EMBED_GOOD)
+        post_status(url, 'Macro started', colour=EMBED_GOOD,
+                    username=self.player_name or self.cfg_str('roblox_username'), logo=True)
         self._set(biome=('watching', GOOD))
         try:
             watcher = BiomeWatcher(float(cfg.get('cooldown_seconds') or 300))
@@ -1678,24 +2252,63 @@ class MacroEngine:
             if failed:
                 post_event(url, 'Biome detection stopped', '`%s`' % failed, EMBED_BAD, 'Biome')
             else:
-                post_event(url, 'Macro stopped')
+                post_status(url, 'Macro stopped', colour=EMBED_INFO)
             if self.biome_stop is stop:
                 self.biome_stop = None
             self._set(biome=(failed, BAD) if failed else ('idle', DIM))
+
+    def boss_present(self):
+        """A boss confirmed in-game is still around in its own biome, so skip the Cursed Rune."""
+        now = time.monotonic()
+        self._boss_here = {b: at for b, at in self._boss_here.items()
+                           if now - at <= BOSS_HERE_S}
+        if not self._boss_here:
+            return False
+        here = base_biome(self.biome_now or '').replace(' ', '').upper()
+        if not here:
+            return True
+        return any(BOSS_BIOMES.get(b, '').replace(' ', '').upper() == here
+                   for b in self._boss_here)
 
     def merchant_arrived(self, merchant, how, url=None):
         posted = self._merchant_posted
         if time.time() - posted.get(merchant, 0.0) <= MERCHANT_REPEAT_S:
             return
         need = BOSS_BIOMES.get(merchant)
-        if need and self.biome_now and not rune_biome(self.biome_now, {need}):
-            if time.monotonic() - self._boss_seen.get(merchant, -1e9) > BOSS_EARLY_S:
-                note('merchant', '%s seen outside %s: not posted unless %s starts' % (merchant, pretty(need), pretty(need)))
-            self._boss_seen[merchant] = time.monotonic()
-            return
+        if need:
+            # A cache hit alone is not a spawn: Roblox touches these animation
+            # files while the game is still loading. Only count a boss once we
+            # are really in the game, and only in its own biome. A hit just
+            # before the biome starts is posted by _on_biome_change instead.
+            if not self.connected():
+                self._boss_seen[merchant] = time.monotonic()
+                return
+            if self.biome_now and not rune_biome(self.biome_now, {need}):
+                if time.monotonic() - self._boss_seen.get(merchant, -1e9) > BOSS_EARLY_S:
+                    note('merchant', '%s seen outside %s: not posted unless %s starts' % (merchant, pretty(need), pretty(need)))
+                self._boss_seen[merchant] = time.monotonic()
+                return
         posted[merchant] = time.time()
+        if need:
+            self._boss_here[merchant] = time.monotonic()
         note('merchant', '%s arrived (%s)' % (merchant, how))
-        post_merchant(url or self.url, merchant, self.server_link or game.load_settings().get('private_server', ''))
+        try:
+            import local_db
+            local_db.add_merchant(merchant, how, self.server_link or game.load_settings().get('private_server', ''),
+                                  posted[merchant])
+        except Exception:
+            pass
+        if need:
+            self._stats_bosses += 1
+        else:
+            self._stats_merchants += 1
+        # Bosses always post in Discord webhooks even when Silent Merchant is on.
+        # Silent Merchant suppresses only regular merchant spawn alerts.
+        if not self.cfg_bool('silent_merchant') or need:
+            post_merchant(url or self.url, merchant, self.server_link or game.load_settings().get('private_server', ''),
+                          watch=list(self.wanted), collect=self.collect and merchant in self.collect_names, how=how)
+        else:
+            note('merchant', 'silent mode: no spawn alert sent')
         self._set(phase='%s arrived' % merchant, colour=GOOD)
         if self.collect and merchant in self.collect_names:
             self.merchant_due, self.merchant_at, self.merchant_tries = merchant, time.monotonic(), 0
@@ -1706,9 +2319,14 @@ class MacroEngine:
             try:
                 came = self.cache.poll()
                 said = posted = False
-                if came and self.running and self.merchant_detect:
+                if came and self.running:
+                    bosses = set(BOSS_BIOMES)
                     for name in came:
-                        self.merchant_arrived(name, 'seen in Roblox\'s cache')
+                        if name in bosses:
+                            if self.boss_detect:
+                                self.merchant_arrived(name, 'seen in Roblox\'s cache')
+                        elif self.merchant_detect:
+                            self.merchant_arrived(name, 'seen in Roblox\'s cache')
                 self._keep_block()
             except Exception as e:
                 if not said:
@@ -1718,32 +2336,50 @@ class MacroEngine:
                         type(e).__name__, e, path.replace(merchant_cache.LOCAL, '%LOCALAPPDATA%'),
                         '; cannot open ' + ', '.join(bad) if bad else ''))
                     said = True
-                if not posted and self.running and self.merchant_detect:
-                    post_event(self.url, 'Merchant detection is not working', CACHE_UNREADABLE, EMBED_BAD, 'Merchant')
+                if not posted and self.running and (self.merchant_detect or self.boss_detect):
+                    boss_only = self.boss_detect and not self.merchant_detect
+                    post_event(self.url, 'Boss detection is not working' if boss_only else 'Merchant detection is not working',
+                               CACHE_UNREADABLE, EMBED_BAD, 'Boss' if boss_only else 'Merchant')
                     posted = True
             time.sleep(2)
 
+    def _tracked_files(self):
+        """Cache keys for whichever of merchants and Halloween bosses the user is watching."""
+        names = []
+        if self.cfg_bool('merchant_on'):
+            names.extend(('Mari', 'Jester', 'Rin'))
+        if self.cfg_bool('boss_on'):
+            names.extend(BOSS_BIOMES)
+        return {k for name in names for k in merchant_cache.FILES.get(name, ())}
+
     def _keep_block(self):
-        keys = {k for ks in merchant_cache.FILES.values() for k in ks}
+        want = self._tracked_files()
         with self.block_lock:
-            if self._closing or not keys:
+            if self._closing:
                 return
-            if self.block_on:
+            if want:
                 path = self.cache.cache()
                 if not path:
                     return
-                wrote = merchant_cache.block(keys, path)
+                wrote = merchant_cache.block(want, path)
                 if wrote:
                     self.cache.forget(wrote)
                     past = self.loaded_already(wrote)
-                    note('merchant', '%s %d merchant animation(s) in Roblox\'s cache%s' % (
+                    note('merchant', '%s %d animation(s) in Roblox\'s cache%s' % (
                         'blocked again' if self.blocked else 'blocked', len(wrote),
                         ': this Roblox already loaded a real one' if past else ''))
                     self.got_past_block = self.got_past_block or past
                     self.blocked = {**self.blocked, **wrote}
                     self.block_path = path
+                extra = set(self.blocked) - want
+                if extra:
+                    n = merchant_cache.unblock(extra, self.block_path or path)
+                    for key in extra:
+                        self.blocked.pop(key, None)
+                    if n:
+                        note('merchant', 'block taken out of Roblox\'s cache (%d)' % n)
             elif self.blocked or self.cache.ours:
-                self._unblock(keys)
+                self._unblock({k for ks in merchant_cache.FILES.values() for k in ks})
 
     def _unblock(self, keys):
         path = self.block_path or self.cache.cache()
@@ -1784,17 +2420,14 @@ class MacroEngine:
         change = watcher.feed(biome)
         if change:
             name, alert = change
-            if alert:
-                self.rares_count += 1
             self.rune_biome_changed(name)
             self.pop_biome_changed(name)
-            for boss, at in list(self._boss_seen.items()):
-                if time.monotonic() - at <= BOSS_EARLY_S and rune_biome(name, {BOSS_BIOMES[boss]}):
-                    self.merchant_arrived(boss, 'seen just before %s started' % pretty(name))
+            if self.boss_detect:
+                for boss, at in list(self._boss_seen.items()):
+                    if time.monotonic() - at <= BOSS_EARLY_S and rune_biome(name, {BOSS_BIOMES[boss]}):
+                        self.merchant_arrived(boss, 'seen just before %s started' % pretty(name))
             self._boss_seen.clear()
-            append_history(name)
             with self._lock:
-                self._biome_counts[base_biome(name) or name] += 1
                 self._history.append({'biome': name, 'time': time.strftime('%H:%M:%S')})
                 if len(self._history) > 100:
                     del self._history[:50]
@@ -1821,7 +2454,7 @@ class MacroEngine:
                 how = 'Clipped using hotkey' if path is True else 'clips\\%s' % os.path.basename(path)
                 post_event(self.url, 'Aura Clipped - %s' % aura, '', colour, 'Clip',
                            [('Rarity', odds, True), ('Biome', pretty(self.biome_now) or '-', True), ('Clip', how, True)],
-                           shot=shot, thumb=biome_png(self.biome_now))
+                           shot=shot, thumb=asset_png('aura_clip_logo.png'))
         self.clipper.clip('%s' % aura, done)
 
     # --------------------------------------------------------------- Actions
@@ -1846,8 +2479,8 @@ class MacroEngine:
             msg = 'Roblox is running as administrator, so Windows will not let the macro click in it. Reopen Roblox normally.'
             self.notice('Cannot start: ' + msg, BAD, 8000)
             return msg
-        self.merchant_detect = self.cfg_bool('merchant_on')
-        if self.merchant_detect and not merchant_cache.cache_found():
+        self._sync_detect()
+        if self.block_on and not merchant_cache.cache_found():
             self.phase("Roblox's cache was not found", BAD)
             self.notice('Cannot start: ' + STORE_ROBLOX.split('\n')[0], BAD, 8000)
             return STORE_ROBLOX.split('\n')[0]
@@ -1889,19 +2522,75 @@ class MacroEngine:
         self.equip_due = time.monotonic() if self.equip_aura else None
         self.crack_on, self.in_dimension = self.cfg_bool('eden_on'), True
         self.run_wall, self.equip_busy_at, self.equip_fails = time.time(), -EQUIP_GAP_S, 0
+        self._stats_fish = self._stats_merchants = self._stats_bosses = self._stats_points = 0
+        self._life_epoch += 1
+        self.fisher = None
         self.start_biomes(self.url)
+        self._sync_biomes_from_log()
+        self.paused = False
+        game.PAUSED.clear()
         self.running = True
         self.phase('running', GOOD)
-        threading.Thread(target=self._guard, daemon=True).start()
+        try:
+            self._toast.banner('start', 2000)
+        except Exception:
+            pass
+        self._guard_thread = threading.Thread(target=self._guard, daemon=True)
+        self._guard_thread.start()
         return None
 
+    def sync_runtime_cfg(self, patch=None):
+        """Refresh fields cached at start so UI toggles apply live, without a restart."""
+        patch = patch or {}
+        try:
+            self.url = clean_url(self.cfg_str('webhook_url'))
+            self.wanted = self.wanted_items()
+            self.collect_names = set(self.cfg.get('collect_merchants') or ['Jester', 'Mari', 'Rin'])
+            self.use_items = self.cfg_bool('auto_items')
+            self.reconnect_on = self.cfg_bool('auto_reconnect')
+            self.rune_biomes = set(self.cfg.get('rune_biomes') or RUNE_BIOMES) if self.cfg_bool('rune_on') else set()
+            self.rune_wait = self.rune_delay()
+            self.selector_biome = self.cfg_str('selector_biome', 'HEAVEN') if self.cfg_bool('selector_on') else None
+            if self.selector_biome and self.selector_due is None:
+                self.selector_due = time.monotonic()
+            elif not self.selector_biome:
+                self.selector_due = None
+            self.pop_list = self.pop_items()
+            self.pop_biomes = set(self.pop_list) if self.cfg_bool('pop_on') else set()
+            self.clip_min = clip_floor(self.cfg_str('clip_min', '1,000,000,000'))
+            self.equip_aura = self._correct_aura() if self.cfg_bool('equip_on') else None
+            if self.equip_aura and self.equip_due is None:
+                self.equip_due = time.monotonic()
+            elif not self.equip_aura:
+                self.equip_due = None
+            # new aura to keep equipped: schedule it promptly
+            if 'equip_on' in patch or 'equip_aura' in patch:
+                self.equip_fails = 0
+                if self.equip_aura:
+                    self.equip_due = time.monotonic()
+            if 'rune_on' in patch or 'rune_biomes' in patch or 'rune_after' in patch:
+                self.rune_due = (time.monotonic() + self.rune_wait) if self.rune_biomes else None
+                self.rune_tries = 0
+            if 'pop_on' in patch or 'pop_items' in patch:
+                self.pop_due = time.monotonic() if self.pop_biomes else None
+            if 'fish_on' in patch or 'eden_on' in patch:
+                self.crack_on = self.cfg_bool('eden_on')
+            note('cfg', 'settings applied live')
+        except Exception as e:
+            note('cfg', 'live apply failed: %s: %s' % (type(e).__name__, e))
+
     def tell(self, title, detail='', colour=None, area='Macro'):
-        thumb = biome_png(self.biome_now) if area in ('Biome', 'Pop', 'Rune', 'Selector') and self.biome_now else None
-        post_event(self.url, title, detail, colour if colour is not None else EMBED_INFO, area, thumb=thumb)
+        thumb = (asset_png('rune_icon.png') if area == 'Rune'
+                 else biome_png(self.biome_now) if area in ('Biome', 'Pop', 'Selector') and self.biome_now else None)
+        shade = colour if colour is not None else EMBED_INFO
+        # failures carry a screenshot so you can see what the macro saw
+        shot = _screen_shot() if shade == EMBED_BAD else None
+        post_event(self.url, title, detail, shade, area, thumb=thumb, shot=shot)
         self._set(phase='%s%s' % (title, ' - ' + detail if detail else ''))
 
     def _guard(self):
         ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
+        epoch = self._life_epoch
         try:
             for k in itertools.count():
                 try:
@@ -1932,7 +2621,14 @@ class MacroEngine:
                     note('run', 'run restarted after a stall')
         finally:
             ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+            self._commit_lifetime(epoch)
             self.running = False
+            self.paused = False
+            try:
+                self._toast.banner('stop', 2000)
+            except Exception:
+                pass
+            game.PAUSED.clear()
             if self.biome_stop is not None:
                 self.biome_stop.set()
             if self.clipper is not None:
@@ -1946,8 +2642,27 @@ class MacroEngine:
             self.beat = time.monotonic()
             if halt():
                 return False
+            if self.paused and not game.ABORT:
+                # hold the wait while paused, so nothing runs and the paused time does not count
+                t0 = time.perf_counter()
+                time.sleep(0.2)
+                end += time.perf_counter() - t0
+                continue
             time.sleep(0.2)
         return not halt()
+
+    def _pause_wait(self):
+        """Hold the run while paused (releasing held keys); nothing is driven again until resume()."""
+        try:
+            game.release_all(focus=False)
+        except Exception:
+            pass
+        self.phase('paused', WARN)
+        while self.paused and not game.ABORT and not self._closing:
+            self.beat = time.monotonic()
+            time.sleep(0.2)
+        if not game.ABORT and self.running:
+            self.phase('running', GOOD)
 
     def play(self):
         game.ABORT = False
@@ -1962,10 +2677,10 @@ class MacroEngine:
         self.watch.poll()
         if not game.roblox_running():
             self.need_rejoin = 'Roblox is not running'
-        elif self.merchant_detect and self.reconnect_on and self.loaded_already():
-            note('merchant', 'this Roblox loaded a merchant before the block: reopening it so every visit shows')
+        elif self.block_on and self.reconnect_on and self.loaded_already():
+            note('merchant', 'this Roblox loaded a merchant or boss before the block: reopening it so every visit shows')
             game.close_roblox()
-            self.need_rejoin = 'a merchant was loaded before the block'
+            self.need_rejoin = 'a merchant or boss was loaded before the block'
         self.got_past_block = False
         self.run_id += 1
         self.beat = time.monotonic()
@@ -1976,6 +2691,7 @@ class MacroEngine:
         self.fit_roblox()
         if self.need_rejoin is None:
             self.daily_later()
+            self._claim_daily_now()
 
         seer = eden.Watcher() if self.cfg_bool('eden_on') else None
         afk_due = time.monotonic() + AFK_EVERY_S
@@ -1983,6 +2699,9 @@ class MacroEngine:
         self.daily_at = next_daily()
         halt = lambda: game.ABORT or self.need_rejoin is not None
         busy = lambda: halt() or self.merchant_due is not None or self.pop_due is not None
+        if self.fisher is not None:
+            self._stats_fish += self.fisher.caught
+            self._stats_points += self.fisher.points_earned
         self.fisher = fishing.Fisher(
             vip=self.cfg_bool('fish_vip', True),
             sell_every=self.sell_every(),
@@ -1990,12 +2709,18 @@ class MacroEngine:
             sell_all=self.cfg_bool('fish_sell_all', True),
             full_check=self.cfg_bool('fish_full_check', True),
             say=lambda m: (note('fishing', m), self._ai_observe_msg(m)),
-            report=self.post_fishing
+            report=self.post_fishing,
+            on_balance=self._set_fish_points,
         ) if self.cfg_bool('fish_on') else None
         self.check_chat_on_start()
         self.ai_preflight()
         self._set(phase='running', colour=GOOD)
         while not game.ABORT:
+            if self.paused:
+                self._pause_wait()
+                if game.ABORT:
+                    break
+                continue
             if self.need_rejoin:
                 self.merchant_due = None
                 self._merchant_posted = {}
@@ -2014,13 +2739,13 @@ class MacroEngine:
                     self.fisher.lost()
                 if self.crack_on and not self.need_rejoin:
                     self.use_crack(halt, 'back to Eden\'s dimension after the rejoin')
-            if (self.got_past_block and self.merchant_detect and self.reconnect_on and not self.merchant_due
+            if (self.got_past_block and self.block_on and self.reconnect_on and not self.merchant_due
                     and not (self.fisher and self.fisher.line_out) and not is_rare(self.biome_now)):
                 self.got_past_block = False
-                note('merchant', 'Roblox loaded a merchant\'s real animation and keeps it: reopening it so every '
+                note('merchant', 'Roblox loaded a merchant or boss animation and keeps it: reopening it so every '
                                  'visit shows again')
                 game.close_roblox()
-                self.need_rejoin = 'a merchant was loaded past the block'
+                self.need_rejoin = 'a merchant or boss was loaded past the block'
                 continue
             self.check_in_game()
             if self.need_rejoin:
@@ -2057,9 +2782,16 @@ class MacroEngine:
                 self.between_fish(busy, 'selector', 'Biome Selector due', self.selector_turn)
             if time.time() >= self.daily_at and not busy():
                 self.between_fish(busy, 'daily', 'daily rewards reset', self.daily_reset_turn)
-            if game.after_align and time.monotonic() >= self.daily_by and not busy():
-                game.after_align = None
-                self.claim_daily()
+            if (time.monotonic() < getattr(self, '_daily_until', 0)
+                    and time.monotonic() >= getattr(self, 'daily_by', 0) and not busy()):
+                self._claim_daily_now()
+                if time.monotonic() < getattr(self, '_daily_until', 0):
+                    self.daily_by = time.monotonic() + 20
+            elif (getattr(self, '_daily_until', 0) and time.monotonic() >= self._daily_until
+                    and not getattr(self, '_daily_noted', False)):
+                self._daily_noted = True
+                game.before_respawn = None
+                note('daily', 'no daily rewards window')
             if (self.equip_due is not None and time.monotonic() >= self.equip_due and not busy()):
                 self.between_fish(busy, 'equip', 'putting %s back on' % self.equip_aura, self.equip_turn)
             if seer is not None and not self.need_rejoin and seer.seen():
@@ -2104,6 +2836,26 @@ class MacroEngine:
             note('run', 'run ended by the stall watchdog')
             return
         note('run', 'run ended%s' % (' (Stop pressed)' if game.ABORT else ''))
+        # Post macro stats to Discord webhook on stop
+        if self.url:
+            try:
+                sess = self._session_totals()
+                total_fish = sess['fish']
+                points = sess['points']
+                merchants = sess['merchants']
+                boss_alerts = sess['bosses']
+                ended = 'Stop pressed' if game.ABORT else 'Run finished'
+                length = span(time.time() - self.run_wall) if self.run_wall else ''
+                post_run_summary(
+                    self.url, total_fish, points, merchants, boss_alerts,
+                    player=self.player_name or self.cfg_str('roblox_username'),
+                    length=length, ended=ended,
+                    server=self.server_link or self.cfg_str('private_server'),
+                )
+                note('webhook', 'stats: %d fish, %s points, %d merchants, %d bosses'
+                     % (total_fish, format(points, ','), merchants, boss_alerts))
+            except Exception as e:
+                note('webhook', 'stats post failed: %s: %s' % (type(e).__name__, e))
 
     def jump(self):
         try:
@@ -2235,17 +2987,29 @@ class MacroEngine:
             note('window', 'sizing the Roblox window failed: %s: %s' % (type(e).__name__, e))
 
     def check_chat_on_start(self):
-        """Detect whether Roblox chat is ON when starting/rejoining and turn it off if open."""
+        """Double-check Roblox chat at start: if open, close it and confirm it stayed closed."""
         try:
             if game.roblox_window() is None:
+                note('chat', 'Roblox is not open: skipping the chat check')
                 return None
-            if game.chat_open():
-                note('chat', 'chat is ON at start: turning it off')
-                ok = game.close_chat()
-                note('chat', 'chat turned OFF' if ok else 'chat still appeared open after clicking toggle')
-                return False
-            note('chat', 'chat is OFF')
-            return True
+            game.paced(0.4)
+            if game.chat_open() is False:
+                game.paced(0.4)                       # double check before trusting the first read
+                if game.chat_open() is False:
+                    note('chat', 'chat is OFF (checked twice)')
+                    return True
+            note('chat', 'chat is ON at start: turning it off')
+            for attempt in range(3):
+                game.close_chat()
+                game.paced(0.5)
+                if game.chat_open() is False:
+                    game.paced(0.4)                   # confirm again after closing
+                    if game.chat_open() is False:
+                        note('chat', 'chat turned OFF and confirmed (attempt %d)' % (attempt + 1))
+                        return True
+                note('chat', 'chat still open after attempt %d, retrying' % (attempt + 1))
+            note('chat', 'chat is still ON after 3 attempts')
+            return False
         except Exception as e:
             note('chat', 'chat check failed: %s: %s' % (type(e).__name__, e))
             return None
@@ -2390,10 +3154,11 @@ class MacroEngine:
             self.daily_later()
             self.watch = game.Watch()
             return True
-        if not self.reconnect_on:
+        # read live so toggling Auto Reconnect in the UI takes effect immediately
+        if not self.cfg_bool('auto_reconnect'):
             return self.wait_for_game(why or '')
         note('connection', 'reconnecting: %s' % (why or ''))
-        self.tell('Reconnecting', capital(why), EMBED_BAD, 'Connection')
+        post_status(self.url, 'Reconnecting', capital(why), EMBED_BAD, 'Connection')
         k = -1
         while True:
             k += 1
@@ -2416,13 +3181,14 @@ class MacroEngine:
                 return False
             if ok:
                 note('connection', 'rejoined')
-                self.tell('Rejoined the private server', '', EMBED_GOOD, 'Connection')
+                post_status(self.url, 'Rejoined the private server', '', EMBED_GOOD, 'Connection')
                 self.daily_later()
                 return True
             wait = REJOIN_WAITS[min(k, len(REJOIN_WAITS) - 1)]
             note('connection', 'rejoin %d failed (%s), again in %d s' % (k + 1, failed or 'see above', wait))
-            self.tell('Could not rejoin', '%sTrying again in %ds' % (capital(failed) + '\n' if failed else '', wait),
-                      EMBED_BAD, 'Connection')
+            post_status(self.url, 'Could not rejoin',
+                        '%sTrying again in %ds' % (capital(failed) + '\n' if failed else '', wait),
+                        EMBED_BAD, 'Connection')
             if not self.nap(wait):
                 return False
 
@@ -2453,6 +3219,13 @@ class MacroEngine:
             watch.poll()
             if watch.state == 'joined' and game.in_game(watch):
                 return True
+            # skip the FLASH WARNING / intro cutscene so the rejoin doesn't sit on it
+            try:
+                if self.cfg_bool('skip_intro', True) and game.flash_warning_up():
+                    game.skip_intro(stop=lambda: game.ABORT,
+                                    say=lambda m: note('connection', m))
+            except Exception:
+                pass
             if game.find_play() is not None or (watch.in_menu and time.time() - watch.menu_at < game.MENU_S):
                 clear_since = None
                 if time.monotonic() - clicked > PLAY_EVERY_S:
@@ -2504,33 +3277,73 @@ class MacroEngine:
 
     def daily_reset_turn(self):
         self.daily_at = next_daily()
+        self.daily_later()
         self.claim_daily()
 
     def daily_later(self):
+        """Watch for the login reward for a few minutes. Claim it before a reset or Collection closes it."""
         game.after_align = self.claim_daily
-        self.daily_by = time.monotonic() + DAILY_LATE_S
+        game.before_respawn = self._claim_daily_now
+        self._daily_until = time.monotonic() + 180
+        self._daily_noted = False
+        self.daily_by = time.monotonic() + 12
 
-    def claim_daily(self):
-        if game.ABORT:
+    def _claim_daily_now(self):
+        """One look. Used before Esc and between fish so a visible panel is claimed, not dismissed."""
+        if game.ABORT or getattr(self, '_daily_busy', False):
             return
         try:
-            game.paced(game.DAILY_WAIT_S)
-            done = game.daily_by_clicks()
-        except Exception as e:
-            done = None
-            note('daily', 'crashed: %s: %s' % (type(e).__name__, e))
-        note('daily', {'claim': 'daily rewards claimed', 'claimed': 'daily rewards already claimed: window closed',
-                       False: 'no daily rewards window'}.get(done, 'daily rewards check failed'))
+            up = game.daily_state() is not None or game._daily_x()
+        except Exception:
+            return
+        if up:
+            self.claim_daily(wait=0)
+
+    def claim_daily(self, wait=None):
+        if game.ABORT or getattr(self, '_daily_busy', False):
+            return
+        self._daily_busy = True
+        try:
+            try:
+                if wait is None:
+                    game.paced(game.DAILY_WAIT_S)
+                done = game.daily_by_clicks(wait=game.DAILY_SHOW_S if wait is None else wait)
+            except Exception as e:
+                done = None
+                note('daily', 'crashed: %s: %s' % (type(e).__name__, e))
+        finally:
+            self._daily_busy = False
+        if done not in (False, None):
+            self._daily_until = 0
+            self._daily_noted = True
+            game.before_respawn = None
+            if game.after_align == self.claim_daily:
+                game.after_align = None
+        if done == 'stuck':
+            note('daily', 'the Daily Rewards window would not close: clearing it before the next action')
+            try:
+                game.close_guis()
+            except Exception:
+                pass
+            return
+        if done is False and wait == 0:
+            return
+        if done is False and time.monotonic() < getattr(self, '_daily_until', 0):
+            return
+        note('daily', {'claim': 'daily rewards claimed', 'claimed': 'daily rewards already claimed',
+                       'closed': 'daily rewards window closed', False: 'no daily rewards window'}.get(
+                           done, 'daily rewards check failed'))
 
     def post_fishing(self, detail):
         if not self.url:
             return
         try:
-            post_shot(self.url, 'Fishing failsafe', EMBED_BAD, '', detail, 'Fishing')
+            post_alert(self.url, 'Fishing failsafe', detail, EMBED_BAD, 'Fishing', 'fishing_icon.png', '🎣')
         except Exception as e:
             note('fishing', 'webhook: %s: %s' % (type(e).__name__, e))
 
     def collect_merchant(self, name, halt):
+        silent = self.cfg_bool('silent_merchant')
         say = lambda m: note('merchant', m)
         self._set(phase='going to %s' % name, colour=GOOD)
         moved, got = True, None
@@ -2542,22 +3355,28 @@ class MacroEngine:
             moved = got is not False
             if not got:
                 if not halt() and getattr(self, 'merchant_tries', MERCHANT_TRIES) >= MERCHANT_TRIES:
-                    self.tell("Could not open %s's shop" % name, shop.why or 'The shop did not open',
-                              EMBED_BAD, 'Merchant')
+                    if not silent:
+                        self.tell("Could not open %s's shop" % name, shop.why or 'The shop did not open',
+                                  EMBED_BAD, 'Merchant')
                 elif not halt():
                     say('%s: trying again while %s is here' % (shop.why or 'the shop did not open', name))
                 self.close_guis()
                 return False
             found, bought = got
-            items = ', '.join(found[s] for s in sorted(found)) or 'Could not read the items'
-            post_shot(self.url, 'Merchant Items - %s' % name, MERCHANT_COLOURS.get(name, EMBED_GOLD),
-                      area='Merchant', fields=[('Item list', items, False),
-                                               ('Bought', '\n'.join(bought) or 'Nothing', False)])
+            # Rin always has the same stock: only announce that it spawned, no manifest.
+            if name != 'Rin' and not silent:
+                items = ', '.join(found[s] for s in sorted(found)) or 'Could not read the items'
+                post_event(self.url, '%s Shop Manifest — %s' % (MERCHANT_BADGES.get(name, '🛰️'), name),
+                           '-# Radar scan complete · shop inventory read',
+                           MERCHANT_COLOURS.get(name, EMBED_GOLD), area='Merchant', merchant=name,
+                           fields=[('📦 Stock read', items, False),
+                                   ('🛍️ Bought', '\n'.join(bought) or 'Nothing', False)])
             time.sleep(1.0)
             shop.close_shop()
         except Exception as e:
             say('failed - %s: %s' % (type(e).__name__, e))
-            self.tell('Merchant collection failed', '`%s: %s`' % (type(e).__name__, e), EMBED_BAD, 'Merchant')
+            if not silent:
+                self.tell('Merchant collection failed', '`%s: %s`' % (type(e).__name__, e), EMBED_BAD, 'Merchant')
             self.merchant_tries = MERCHANT_TRIES
             try:
                 shop.close_shop()
@@ -2628,6 +3447,12 @@ class MacroEngine:
         game.INTERRUPT = self.dropped
         try:
             work()
+            # double-check: clear any Inventory/menu left open by a swallowed click
+            try:
+                self.close_guis()
+                game.release_all()
+            except Exception:
+                pass
         finally:
             game.INTERRUPT = None
             if self.dropped():
@@ -2667,7 +3492,8 @@ class MacroEngine:
             self.equip_due = time.monotonic() + wait
             say('trying again in %d minutes' % (wait // 60))
             if self.equip_fails == 1:
-                self.tell('Could not equip %s' % aura, 'Trying again in %d minutes' % (wait // 60), EMBED_BAD, 'Aura')
+                post_alert(self.url, 'Could not equip %s' % aura,
+                           'Trying again in %d minutes' % (wait // 60), EMBED_BAD, 'Aura', 'aura_icon.png', '⚠️')
         else:
             self.equip_due = time.monotonic()
 
@@ -2675,6 +3501,10 @@ class MacroEngine:
         biome = rune_biome(name, self.rune_biomes)
         if biome is None:
             self.rune_due = None
+            return
+        if self.boss_present():
+            self.rune_due = None
+            note('rune', '%s started, but a boss is here: no Cursed Rune Fragment used' % pretty(biome))
             return
         self.rune_due, self.rune_tries = time.monotonic() + self.rune_wait, 0
         note('rune', '%s started: a Cursed Rune Fragment in %d s' % (pretty(biome), self.rune_wait))
@@ -2684,6 +3514,10 @@ class MacroEngine:
         biome = rune_biome(self.biome_now, self.rune_biomes)
         if biome is None:
             say('the biome is over (%s now): no Cursed Rune Fragment used' % (pretty(self.biome_now) or 'unknown'))
+            self.rune_due = None
+            return
+        if self.boss_present():
+            say('a boss is here: no Cursed Rune Fragment used')
             self.rune_due = None
             return
         try:
@@ -2832,6 +3666,10 @@ class MacroEngine:
 
     def close_strays(self):
         try:
+            if game.daily_open():
+                note('menus', 'the Daily Rewards window was open: claiming it')
+                game.close_daily()
+                return
             if not game.inventory_open():
                 return
         except Exception:
@@ -2850,15 +3688,45 @@ class MacroEngine:
         except Exception as e:
             note('menus', 'closing menus failed: %s: %s' % (type(e).__name__, e))
 
+    def pause(self, why='You used the PC'):
+        """Pause the run without stopping it. resume() continues where it left off."""
+        if not self.running or self.paused:
+            return False
+        self.paused = True
+        game.PAUSED.set()
+        try:
+            game.release_all(focus=False)       # let go of held keys, but keep the user's window focused
+        except Exception:
+            pass
+        note('run', 'paused: %s' % why)
+        self.notice('Paused - resumes when you stop using the PC', ACCENT, 5000)
+        self.phase('paused', WARN)
+        return True
+
+    def resume(self):
+        """Continue a paused run; the input that woke it is not counted as the user taking over."""
+        if not self.paused:
+            return False
+        self.paused = False
+        game.PAUSED.clear()
+        game.forget_user_input()
+        note('run', 'resumed')
+        self.notice('Resumed', GOOD, 3000)
+        self.phase('running', GOOD)
+        return True
+
     def _watch_user_pc(self):
-        """Stop the run when the person at the PC moves the mouse or presses a key."""
+        """Pause the run when the person at the PC moves the mouse or presses a key, and resume once idle."""
         while not self._closing:
             try:
-                if (self.running and not game.ABORT and self.cfg_bool('yield_pc', True)
-                        and game.user_took_over()):
-                    note('run', 'you used the PC: stopping')
-                    self.notice('You used the PC, so the macro stopped', ACCENT, 5000)
-                    self.stop()
+                if self.running and not game.ABORT and self.cfg_bool('yield_pc', True):
+                    if game.user_took_over():
+                        if not self.paused:
+                            self.pause()
+                    elif self.paused and game.user_idle_seconds() >= PC_RESUME_IDLE_S:
+                        self.resume()
+                elif self.paused:
+                    self.resume()
             except Exception:
                 pass
             time.sleep(0.15)
@@ -2867,6 +3735,8 @@ class MacroEngine:
         note('run', 'Stop pressed')
         self.start_again = False
         self.restart_run = False
+        self.paused = False
+        game.PAUSED.clear()
         game.ABORT = True
         if self.biome_stop is not None:
             self.biome_stop.set()
@@ -2877,13 +3747,25 @@ class MacroEngine:
         if self._closing:
             return
         self._closing = True
+        try:
+            game.set_roblox_topmost(False)
+        except Exception:
+            pass
         self.start_again = False
         self.restart_run = False
+        self.paused = False
+        game.PAUSED.clear()
         self.stop_support_session()
         game.ABORT = True
         if self.biome_stop is not None:
             self.biome_stop.set()
         self.remember()
+        guard = getattr(self, '_guard_thread', None)
+        if guard is not None and guard.is_alive() and guard is not threading.current_thread():
+            self._flush_shown()
+            guard.join(timeout=8)
+        if guard is None or not guard.is_alive():
+            self._commit_lifetime()
         try:
             if self.presence is not None:
                 self.presence.close()
@@ -2921,16 +3803,31 @@ class Api:
                 for k, v in patch.items():
                     if k != 'roblox_username':
                         self.engine.cfg[k] = v
-                if 'merchant_on' in patch:
-                    self.engine.block_on = bool(patch['merchant_on'])
-                    if not self.engine.block_on:
-                        self.engine.merchant_detect = False
+                if 'merchant_on' in patch or 'boss_on' in patch:
+                    self.engine._sync_detect()
                 self.engine.remember()
             if any(k in patch for k in ('perf_mode', 'low_end', 'fx_on')):
                 self.engine.slow_pc = self.engine.wants_lite()
                 game.set_pace(2.0 if self.engine.slow_pc else 1.0)
+            if self.engine.running:
+                self.engine.sync_runtime_cfg(patch)
             self.engine.refresh_discord()
         return self.engine.build_state()
+
+    def verify_passkey(self, key):
+        """Unlock Developer Mode with the unified passkey. Session-only: relocks on restart."""
+        key = (key or '').strip()
+        ok = bool(key) and key == DEVELOPER_PASSKEY
+        with self.engine._lock:
+            if ok:
+                self.engine.developer_locked = False
+        return {'ok': ok, 'developer_locked': self.engine.developer_locked}
+
+    def lock_developer(self):
+        """Re-lock Developer Mode (session ends / user clicks Lock)."""
+        with self.engine._lock:
+            self.engine.developer_locked = True
+        return {'ok': True, 'developer_locked': self.engine.developer_locked}
 
     def sync_roblox_profile(self, username):
         self.engine.apply_roblox_username(username, sync=True)
@@ -3158,7 +4055,7 @@ class Api:
         if self.engine.running:
             self.engine.stop()
         with self.engine._lock:
-            for fname in ('config.json', 'history.jsonl', 'gui_points.json', 'ai_memory.json', 'avatar_custom.png', 'avatar.png'):
+            for fname in ('config.json', 'history.jsonl', 'gui_points.json', 'ai_memory.json', 'lifetime.json', 'avatar_custom.png', 'avatar.png'):
                 p = os.path.join(game.APP_DIR, fname)
                 if os.path.isfile(p):
                     try:
@@ -3177,6 +4074,14 @@ class Api:
             self.engine._history.clear()
             self.engine._biome_counts.clear()
             self.engine.rares_count = 0
+            self.engine._life = {'fish': 0, 'points': 0, 'merchants': 0, 'bosses': 0}
+            self.engine._life_done_epoch = self.engine._life_epoch
+            self.engine._points_live = None
+            self.engine._points_suspect = None
+            self.engine._stats_fish = self.engine._stats_merchants = self.engine._stats_bosses = self.engine._stats_points = 0
+            if self.engine.fisher is not None:
+                self.engine.fisher.caught = 0
+                self.engine.fisher.points_earned = 0
             self.engine.biome_now = 'NORMAL'
             auto_name, auto_uid = detect_roblox_profile()
             self.engine.player_name = auto_name
@@ -3256,6 +4161,105 @@ def _can_write_dir(folder):
         return False
 
 
+def _release_asset_time(asset):
+    """Epoch seconds from a GitHub asset's updated_at, or 0 when unavailable."""
+    stamp = (asset or {}).get('updated_at') or (asset or {}).get('created_at') or ''
+    try:
+        return datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return 0
+
+
+def _release_source_zip(tag):
+    """GitHub source archive for a release tag. The main branch lags published releases."""
+    tag = (tag or '').strip()
+    if tag and not tag.startswith('v') and tag[:1].isdigit():
+        tag = 'v' + tag
+    if not tag or any(c in tag for c in ' /\\?#%'):
+        return SOURCE_ZIP_URL
+    return 'https://github.com/%s/archive/refs/tags/%s.zip' % (REPO_SLUG, tag)
+
+
+def _preserve_source_updater(src_root):
+    """v1.0.3 and v1.0.4 still read VERSION from main. Patch that copy before it replaces this folder."""
+    path = os.path.join(src_root, 'app.py')
+    try:
+        with open(path, encoding='utf-8') as f:
+            text = f.read().replace('\r\n', '\n')
+    except OSError:
+        return
+    if 'zip_url = _release_source_zip(' in text and 'def _release_source_zip(' in text:
+        return
+    old_check = '\n'.join([
+        '                        if frozen:',
+        '                            found = _fetch_latest_release()',
+        '                            remote_ver = found[0] if found else VERSION',
+        '                        else:',
+        '                            remote_ver = _fetch_remote_source_version()',
+        '                            if not remote_ver:',
+        '                                rel = _fetch_latest_release()',
+        '                                remote_ver = rel[0] if rel else VERSION',
+    ])
+    new_check = '\n'.join([
+        '                        found = _fetch_latest_release()',
+        '                        if found:',
+        '                            remote_ver = found[0]',
+        '                        elif frozen:',
+        '                            remote_ver = VERSION',
+        '                        else:',
+        '                            remote_ver = _fetch_remote_source_version() or VERSION',
+    ])
+    old_dl = '\n'.join([
+        "                    note('update', 'downloading source update %s' % SOURCE_ZIP_URL)",
+        '                    _download_file(',
+        '                        SOURCE_ZIP_URL, zip_path,',
+    ])
+    new_dl = '\n'.join([
+        '                    zip_url = _release_source_zip(found[0] if found else remote_ver)',
+        "                    note('update', 'downloading source update %s' % zip_url)",
+        '                    _download_file(',
+        '                        zip_url, zip_path,',
+    ])
+    slash = '\\'
+    guard = "    if not tag or any(c in tag for c in ' /" + slash + slash + "?#%'):"
+    helper = '\n'.join([
+        'def _release_source_zip(tag):',
+        '    """GitHub source archive for a release tag. The main branch lags published releases."""',
+        "    tag = (tag or '').strip()",
+        "    if tag and not tag.startswith('v') and tag[:1].isdigit():",
+        "        tag = 'v' + tag",
+        guard,
+        '        return SOURCE_ZIP_URL',
+        "    return 'https://github.com/%s/archive/refs/tags/%s.zip' % (REPO_SLUG, tag)",
+        '',
+        '',
+    ])
+    changed = False
+    if old_check in text:
+        text = text.replace(old_check, new_check, 1)
+        changed = True
+    old_refresh = 'if found and not newer_ver and found[3]:'
+    new_refresh = 'if frozen and found and not newer_ver and found[3]:'
+    if old_refresh in text and new_refresh not in text:
+        text = text.replace(old_refresh, new_refresh, 1)
+        changed = True
+    if old_dl in text:
+        text = text.replace(old_dl, new_dl, 1)
+        changed = True
+    if 'def _release_source_zip(' not in text and 'def _fetch_latest_release():' in text:
+        text = text.replace('def _fetch_latest_release():', helper + 'def _fetch_latest_release():', 1)
+        changed = True
+    if not changed:
+        return
+    try:
+        with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(text)
+    except OSError as e:
+        note('update', 'could not keep updater fix in download: %s' % e)
+        return
+    note('update', 'updater in the download now follows release tags')
+
+
 def _fetch_latest_release():
     req = urllib.request.Request(RELEASES, headers={'User-Agent': TITLE, 'Accept': 'application/vnd.github+json'})
     with urllib.request.urlopen(req, timeout=12) as r:
@@ -3272,12 +4276,13 @@ def _fetch_latest_release():
             asset = next((a for a in assets if 'mmacro' in a.get('name', '').lower() and a.get('name', '').lower().endswith('.exe')), None)
         if asset:
             tag = rel.get('tag_name', '')
-            candidates.append((_version_tuple(tag), tag, asset['browser_download_url'], int(asset.get('size') or 0)))
+            candidates.append((_version_tuple(tag), tag, asset['browser_download_url'],
+                               int(asset.get('size') or 0), _release_asset_time(asset)))
     if not candidates:
         return None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    _, tag, url, size = candidates[0]
-    return (tag, url, size)
+    candidates.sort(key=lambda x: (x[0], x[4]), reverse=True)
+    _, tag, url, size, asset_time = candidates[0]
+    return (tag, url, size, asset_time)
 
 
 def _fetch_remote_source_version():
@@ -3380,14 +4385,13 @@ def _attach_auto_updater():
                 remote_ver = None
                 for attempt in range(tries):
                     try:
-                        if frozen:
-                            found = _fetch_latest_release()
-                            remote_ver = found[0] if found else VERSION
+                        found = _fetch_latest_release()
+                        if found:
+                            remote_ver = found[0]
+                        elif frozen:
+                            remote_ver = VERSION
                         else:
-                            remote_ver = _fetch_remote_source_version()
-                            if not remote_ver:
-                                rel = _fetch_latest_release()
-                                remote_ver = rel[0] if rel else VERSION
+                            remote_ver = _fetch_remote_source_version() or VERSION
                         break
                     except Exception as e:
                         note('update', 'check failed (try %d of %d): %s: %s' % (attempt + 1, tries, type(e).__name__, e))
@@ -3397,13 +4401,28 @@ def _attach_auto_updater():
                             _set_upd(self, 'error', 'Update check failed (%s)' % type(e).__name__)
                             return
 
-                if not remote_ver or _version_tuple(remote_ver) <= _version_tuple(VERSION):
+                newer_ver = bool(remote_ver) and _version_tuple(remote_ver) > _version_tuple(VERSION)
+                refreshed_build = False
+                if frozen and found and not newer_ver and found[3]:
+                    # A release asset can be replaced without changing its tag.
+                    # Pick that up by comparing the asset time with the running file.
+                    try:
+                        local_file = sys.executable if frozen else os.path.join(HERE_DIR, 'app.py')
+                        local_mtime = os.path.getmtime(local_file)
+                    except OSError:
+                        local_mtime = 0
+                    refreshed_build = found[3] > local_mtime + 60
+
+                if not remote_ver or (not newer_ver and not refreshed_build):
                     note('update', 'up to date (v%s)' % VERSION)
                     _set_upd(self, 'uptodate', 'Up to date (v%s)' % VERSION, 100, remote_ver or VERSION)
                     return
 
                 clean_tag = remote_ver.lstrip('v')
-                note('update', 'new update v%s found (current v%s)' % (clean_tag, VERSION))
+                if newer_ver:
+                    note('update', 'new update v%s found (current v%s)' % (clean_tag, VERSION))
+                else:
+                    note('update', 'newer build for v%s found' % clean_tag)
                 if not manual and (not self.cfg_bool('auto_update', True) or self.running or self.ran):
                     _set_upd(self, 'available', 'Update v%s ready' % clean_tag, 0, clean_tag)
                     return
@@ -3416,7 +4435,7 @@ def _attach_auto_updater():
 
                 self.updating = True
                 if frozen:
-                    tag, url, size = found
+                    tag, url, size, _asset_ts = found
                     zipped = url.lower().endswith('.zip')
                     new_path = os.path.join(tempfile.gettempdir(), 'MMacro_update.zip') if zipped else sys.executable + '.new'
                     _set_upd(self, 'downloading', 'Updating to v%s (0%%)...' % clean_tag, 0, clean_tag)
@@ -3441,9 +4460,10 @@ def _attach_auto_updater():
                     zip_path = os.path.join(tmp_dir, 'update.zip')
                     _set_upd(self, 'downloading', 'Updating source to v%s...' % clean_tag, 10, clean_tag)
                     self.phase('updating to v%s...' % clean_tag, ACCENT)
-                    note('update', 'downloading source update %s' % SOURCE_ZIP_URL)
+                    zip_url = _release_source_zip(found[0] if found else remote_ver)
+                    note('update', 'downloading source update %s' % zip_url)
                     _download_file(
-                        SOURCE_ZIP_URL, zip_path,
+                        zip_url, zip_path,
                         progress_cb=lambda f: _set_upd(self, 'downloading', 'Updating to v%s (%d%%)...' % (clean_tag, round(f * 100)), round(f * 100), clean_tag),
                         min_bytes=10_000,
                     )
@@ -3454,6 +4474,7 @@ def _attach_auto_updater():
                     src_root = roots[0] if roots and os.path.isfile(os.path.join(roots[0], 'app.py')) else extract_dir
                     if not os.path.isfile(os.path.join(src_root, 'app.py')):
                         raise RuntimeError('Downloaded archive missing app.py')
+                    _preserve_source_updater(src_root)
                     if self.running or self.ran:
                         self.updating = False
                         _set_upd(self, 'available', 'v%s ready — restart to apply' % clean_tag, 100, clean_tag)
@@ -4095,47 +5116,328 @@ def _clear_old_unpacks():
         note('cleanup', '%s: %s' % (type(e).__name__, e))
 
 
-def only_one():
+def _other_instance_pids():
+    """Other Veyra processes for this install. Calibrator windows are not copies of the app."""
+    me = os.getpid()
+    app = os.path.normcase(os.path.abspath(os.path.join(HERE_DIR, 'app.py')))
+    exe = os.path.normcase(os.path.abspath(sys.executable))
+    frozen = getattr(sys, 'frozen', False)
+    found = []
+    try:
+        import psutil
+    except Exception:
+        return found
+    for proc in psutil.process_iter(['pid', 'cmdline']):
+        try:
+            pid = int(proc.info['pid'] or 0)
+            if not pid or pid == me:
+                continue
+            cmd = proc.info['cmdline'] or []
+            joined = ' '.join(cmd).lower()
+            if '--calibrate' in joined:
+                continue
+            if frozen:
+                if cmd and os.path.normcase(os.path.abspath(cmd[0])) == exe:
+                    found.append(pid)
+                continue
+            for arg in cmd:
+                if not arg.lower().endswith('app.py'):
+                    continue
+                if os.path.normcase(os.path.abspath(arg)) == app:
+                    found.append(pid)
+                    break
+        except (OSError, ValueError, psutil.Error):
+            continue
+    return found
+
+
+def _release_instance_lock():
     global _one
-    k = ctypes.WinDLL('kernel32', use_last_error=True)
-    k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-    k.CreateMutexW.restype = ctypes.c_void_p          # 64-bit handles are not c_int
-    ctypes.set_last_error(0)
-    local = k.CreateMutexW(None, False, 'Local\\MMacroHUD')
-    _one = [local]
-    if not local or ctypes.get_last_error() == 183:
-        return 'Veyra is already open.'
-    user = re.sub(r'[^\w.-]', '_', os.environ.get('USERDOMAIN', '') + '.' + os.environ.get('USERNAME', ''))
-    ctypes.set_last_error(0)
-    glob = k.CreateMutexW(None, False, 'Global\\MMacroHUD-' + user)
-    _one.append(glob)
-    if not glob or ctypes.get_last_error() == 183:
-        return ('Veyra is already running for this Windows account in another session (another RDP).\n\n'
-                'Two macros on one account share Roblox\'s logs and Veyra\'s settings, so each RDP needs its own '
-                'Windows account. Log the second RDP into a different account, then open Veyra there.')
-    return None
+    k = ctypes.windll.kernel32
+    for h in list(_one or []):
+        try:
+            if h:
+                k.CloseHandle(ctypes.c_void_p(h))
+        except Exception:
+            pass
+    _one = []
 
 
-def _focus_existing_mmacro():
+def _visible_windows(pids):
+    """Visible top-level windows owned by these processes."""
     u32 = ctypes.windll.user32
+    wanted = set(int(p) for p in pids)
     found = []
 
     def cb(h, _):
-        n = u32.GetWindowTextLengthW(h)
-        if n > 0:
-            buf = ctypes.create_unicode_buffer(n + 1)
-            u32.GetWindowTextW(h, buf, n + 1)
-            if (buf.value == TITLE or buf.value.startswith(TITLE + '  |')) and u32.IsWindowVisible(h):
-                found.append(h)
+        if not wanted:
+            return True
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        if pid.value in wanted and u32.IsWindowVisible(h):
+            found.append(h)
         return True
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     u32.EnumWindows(WNDENUMPROC(cb), 0)
-    if found:
-        u32.ShowWindow(found[0], 9)
-        u32.SetForegroundWindow(found[0])
+    return found
+
+
+def _end_stuck_instances(pids):
+    """Close leftover Veyra processes that have no window, so a new launch can open."""
+    try:
+        import psutil
+    except Exception:
+        return
+    for pid in pids:
+        try:
+            psutil.Process(int(pid)).kill()
+        except (OSError, ValueError, psutil.Error):
+            pass
+
+
+def only_one(_retry=True):
+    """One Veyra per Windows session. A second launch must not open another copy."""
+    global _one, _existing_pids
+    others = _other_instance_pids()
+    visible = _visible_windows(others)
+    stuck = []
+    if others and not visible:
+        now = time.time()
+        try:
+            import psutil
+            for pid in others:
+                try:
+                    age = now - psutil.Process(int(pid)).create_time()
+                except (OSError, ValueError, psutil.Error):
+                    age = 999
+                if age >= 8:
+                    stuck.append(pid)
+        except Exception:
+            stuck = list(others)
+    _existing_pids = [pid for pid in others if pid not in stuck]
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    k.CreateMutexW.restype = ctypes.c_void_p
+    k.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+                              ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+    k.CreateFileW.restype = ctypes.c_void_p
+    invalid = ctypes.c_void_p(-1).value
+    ctypes.set_last_error(0)
+    local = k.CreateMutexW(None, False, 'Local\\VeyraSingle')
+    local_busy = (not local) or ctypes.get_last_error() == 183
+    lock_path = os.path.join(os.getenv('LOCALAPPDATA') or os.path.expanduser('~'), 'Veyra', 'instance.lock')
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    except OSError:
+        pass
+    ctypes.set_last_error(0)
+    file_h = k.CreateFileW(lock_path, 0x80000000 | 0x40000000, 0, None, 4, 0x80, None)
+    file_busy = (not file_h) or file_h == invalid
+    _one = []
+    if not local_busy and local:
+        _one.append(local)
+    elif local:
+        k.CloseHandle(ctypes.c_void_p(local))
+    if not file_busy and file_h:
+        _one.append(file_h)
+    elif file_h and file_h != invalid:
+        k.CloseHandle(ctypes.c_void_p(file_h))
+    if stuck:
+        _end_stuck_instances(stuck)
+        if local_busy or file_busy:
+            _release_instance_lock()
+            if _retry:
+                time.sleep(0.4)
+                return only_one(_retry=False)
+            return 'Veyra is already open.'
+    if local_busy or file_busy or _existing_pids:
+        if _one and not (local_busy or file_busy):
+            _release_instance_lock()
+        return 'Veyra is already open.'
+    user = re.sub(r'[^\w.-]', '_', os.environ.get('USERDOMAIN', '') + '.' + os.environ.get('USERNAME', ''))
+    ctypes.set_last_error(0)
+    glob = k.CreateMutexW(None, False, 'Global\\VeyraSingle-' + user)
+    glob_busy = (not glob) or ctypes.get_last_error() == 183
+    if glob_busy:
+        if glob:
+            k.CloseHandle(ctypes.c_void_p(glob))
+        _release_instance_lock()
+        return ('Veyra is already running for this Windows account in another session (another RDP).\n\n'
+                'Two macros on one account share Roblox\'s logs and Veyra\'s settings, so each RDP needs its own '
+                'Windows account. Log the second RDP into a different account, then open Veyra there.')
+    _one.append(glob)
+    return None
+
+
+def _focus_existing_mmacro():
+    """Bring the Veyra that is already running to the front. Do not open a second one."""
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    wanted = set(_existing_pids or [])
+    found = []
+
+    def cb(h, _):
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        title = ''
+        n = u32.GetWindowTextLengthW(h)
+        if n > 0:
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u32.GetWindowTextW(h, buf, n + 1)
+            title = buf.value or ''
+        title_ok = title == TITLE or title.startswith(TITLE + '  |')
+        if u32.IsWindowVisible(h) and (pid.value in wanted or title_ok):
+            found.append((0 if title_ok else 1, h))
         return True
-    return False
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    u32.EnumWindows(WNDENUMPROC(cb), 0)
+    if not found:
+        return False
+    found.sort()
+    hwnd = found[0][1]
+    u32.ShowWindow(hwnd, 9)
+    fg = u32.GetForegroundWindow()
+    this_tid = k32.GetCurrentThreadId()
+    fg_tid = u32.GetWindowThreadProcessId(fg, None) if fg else 0
+    if fg_tid and fg_tid != this_tid:
+        u32.AttachThreadInput(this_tid, fg_tid, True)
+    u32.BringWindowToTop(hwnd)
+    u32.SetForegroundWindow(hwnd)
+    if fg_tid and fg_tid != this_tid:
+        u32.AttachThreadInput(this_tid, fg_tid, False)
+    return True
+
+
+def _installed_icon():
+    """Path the shell should show, and a token that changes when that icon file changes."""
+    if getattr(sys, 'frozen', False):
+        path = os.path.abspath(sys.executable)
+        location = path + ',0'
+    else:
+        path = os.path.join(HERE_DIR, 'icon.ico')
+        if not os.path.isfile(path):
+            return '', '', ''
+        path = os.path.abspath(path)
+        location = path + ',0'
+    try:
+        st = os.stat(path)
+    except OSError:
+        return '', '', ''
+    token = '%s|%s|%s' % (path.lower(), st.st_size, int(st.st_mtime))
+    if path.lower().endswith('.ico') and st.st_size < 5_000_000:
+        try:
+            import hashlib
+            h = hashlib.sha256()
+            with open(path, 'rb') as f:
+                h.update(f.read())
+            token = path.lower() + '|' + h.hexdigest()
+        except OSError:
+            pass
+    return path, location, token
+
+
+def _apply_window_icon(hwnd):
+    """Put the current icon.ico on this window so the title bar and taskbar match the update."""
+    ico = os.path.join(HERE_DIR, 'icon.ico')
+    if not hwnd or not os.path.isfile(ico):
+        return
+    user32 = ctypes.windll.user32
+    user32.LoadImageW.restype = ctypes.c_void_p
+    user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
+    IMAGE_ICON = 1
+    LR_LOADFROMFILE = 0x0010
+    big = user32.LoadImageW(None, ico, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
+    small = user32.LoadImageW(None, ico, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+    WM_SETICON = 0x0080
+    if big:
+        user32.SendMessageW(hwnd, WM_SETICON, 1, big)
+    if small:
+        user32.SendMessageW(hwnd, WM_SETICON, 0, small)
+
+
+def _notify_shell_icon(*paths):
+    shell32 = ctypes.windll.shell32
+    SHCNE_UPDATEITEM = 0x00002000
+    SHCNE_ASSOCCHANGED = 0x08000000
+    SHCNF_PATHW = 0x0005
+    SHCNF_FLUSH = 0x1000
+    SHCNF_IDLIST = 0x0000
+    for p in paths:
+        if p and os.path.exists(p):
+            shell32.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, ctypes.c_wchar_p(os.path.abspath(p)), None)
+    shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+
+
+def _sync_installed_icon():
+    """When an update replaces the icon, point shortcuts at it and drop the old Windows cache."""
+    path, location, token = _installed_icon()
+    if not path or not location or not token:
+        return
+    stamp_dir = os.path.join(os.getenv('LOCALAPPDATA') or os.path.expanduser('~'), 'Veyra')
+    stamp_path = os.path.join(stamp_dir, 'icon.stamp')
+    try:
+        with open(stamp_path, encoding='utf-8') as f:
+            prev = f.read().strip()
+    except OSError:
+        prev = ''
+    if prev == token:
+        return
+    app_py = '' if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(HERE_DIR, 'app.py'))
+    exe = os.path.abspath(sys.executable) if getattr(sys, 'frozen', False) else ''
+    ps1 = os.path.join(tempfile.gettempdir(), 'veyra_icon_refresh.ps1')
+    script = r'''param($IconLoc, $Exe, $AppPy, $AppDir)
+$sh = New-Object -ComObject WScript.Shell
+$dirs = @(
+  [Environment]::GetFolderPath('Desktop'),
+  [Environment]::GetFolderPath('CommonDesktopDirectory'),
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu'),
+  (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu'),
+  (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
+  $AppDir
+)
+$n = 0
+foreach ($d in $dirs) {
+  if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+  Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $lnk = $sh.CreateShortcut($_.FullName)
+      $target = [string]$lnk.TargetPath
+      $args = [string]$lnk.Arguments
+      $match = $false
+      if ($Exe -and ($target -ieq $Exe)) { $match = $true }
+      if ($AppPy -and $args -and ($args -like ('*' + $AppPy + '*'))) { $match = $true }
+      if ($match) {
+        $lnk.IconLocation = $IconLoc
+        $lnk.Save()
+        $n++
+      }
+    } catch {}
+  }
+}
+Write-Output $n
+'''
+    try:
+        with open(ps1, 'w', encoding='utf-8') as f:
+            f.write(script)
+        subprocess.run(
+            ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1,
+             '-IconLoc', location, '-Exe', exe, '-AppPy', app_py, '-AppDir', os.path.abspath(HERE_DIR)],
+            capture_output=True, text=True, timeout=25,
+        )
+    except Exception as e:
+        note('update', 'icon refresh failed: %s' % e)
+        return
+    _notify_shell_icon(path, exe)
+    try:
+        os.makedirs(stamp_dir, exist_ok=True)
+        with open(stamp_path, 'w', encoding='utf-8') as f:
+            f.write(token)
+    except OSError:
+        pass
+    note('update', 'app icon updated')
 
 
 def main():
@@ -4145,9 +5447,10 @@ def main():
         sys.exit(0)
     why = only_one()
     if why:
-        if why == 'Veyra is already open.' and _focus_existing_mmacro():
+        if why == 'Veyra is already open.':
+            _focus_existing_mmacro()
             sys.exit(0)
-        ctypes.windll.user32.MessageBoxW(0, why, TITLE, 0x40)
+        dark_message(TITLE, why)
         sys.exit(0)
     threading.Thread(target=_clear_old_unpacks, daemon=True).start()
 
@@ -4174,8 +5477,10 @@ def main():
             hwnd = _find_own_hwnd()
             engine._hwnd = hwnd
             _dark_titlebar_hwnd(hwnd)
+            _apply_window_icon(hwnd)
         except Exception:
             pass
+        threading.Thread(target=_sync_installed_icon, daemon=True).start()
         engine.check_update()
 
     window.events.shown += on_shown
@@ -4189,13 +5494,8 @@ def main():
         try:
             webview.start(debug=False)
         except Exception as e2:
-            ctypes.windll.user32.MessageBoxW(
-                0,
-                f'Veyra could not open its WebView window.\n\n{e2}\n\n'
-                'Make sure Microsoft Edge WebView2 Runtime is installed and .NET Framework 4.8 is enabled.',
-                TITLE,
-                0x10,
-            )
+            dark_message(TITLE, f'Veyra could not open its WebView window.\n\n{e2}\n\n'
+                         'Make sure Microsoft Edge WebView2 Runtime is installed and .NET Framework 4.8 is enabled.')
             sys.exit(1)
 
 

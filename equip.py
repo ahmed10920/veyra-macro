@@ -202,6 +202,13 @@ def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since:
         if not game.open_by_click('aura_storage', halt):
             if halt():
                 return False
+            # a missed click can leave Collection open over everything; close it
+            try:
+                if game.collection_open():
+                    say('Collection left open by a missed click: closing it')
+                    game.exit_collection()
+            except Exception:
+                pass
             shut()                              # the side button toggles, so it may be open anyway
             say('Aura Storage did not open (go %d of %d)' % (go, TRIES))
             continue
@@ -270,3 +277,4 @@ def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since:
     if not halt():
         say('%s could not be equipped after %d goes' % (aura, TRIES))
     return False
+

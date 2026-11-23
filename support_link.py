@@ -37,8 +37,8 @@ ALLOWED_CMDS = {
 # Config keys a connected dev is allowed to adjust remotely (never credentials/webhooks)
 SAFE_DEV_CFG_KEYS = {
     'low_end', 'perf_mode', 'fx_on', 'anti_afk', 'fish_on', 'fish_vip', 'fish_sell_all', 'fish_full_check',
-    'fish_sell', 'fish_sell_amount', 'merchant_on', 'collect_on', 'auto_items',
-    'auto_reconnect', 'rejoin_browser', 'eden_on', 'eden_path', 'clip_on', 'equip_on',
+    'fish_sell', 'fish_sell_amount', 'merchant_on', 'boss_on', 'collect_on', 'auto_items',
+    'auto_reconnect', 'rejoin_browser', 'eden_on', 'eden_path', 'clip_on', 'equip_on', 'skip_intro',
     'rune_on', 'selector_on', 'pop_on',
 }
 
@@ -58,12 +58,10 @@ def normalize_code(code):
 
 def local_ip():
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.3)
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(0.3)
+            s.connect(('8.8.8.8', 80))
+            return s.getsockname()[0]
     except Exception:
         return '127.0.0.1'
 
@@ -77,8 +75,10 @@ def discovery_dir():
 def register_local_session(code, info):
     norm = normalize_code(code)
     p = os.path.join(discovery_dir(), '%s.json' % norm)
-    with open(p, 'w', encoding='utf-8') as f:
+    tmp = '%s.%d.tmp' % (p, os.getpid())
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(info, f)
+    os.replace(tmp, p)
 
 
 def unregister_local_session(code):

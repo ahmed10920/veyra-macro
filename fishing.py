@@ -72,6 +72,12 @@ def walk(route, halt):
             while time.perf_counter() < end:
                 if halt():
                     return False
+                if game.PAUSED.is_set() and not game.ABORT:
+                    # hold the walk while the user has the PC; paused time does not count
+                    t0 = time.perf_counter()
+                    time.sleep(0.05)
+                    end += time.perf_counter() - t0
+                    continue
                 time.sleep(0.005)
             if how == 'down':
                 game.down(key)
@@ -92,6 +98,13 @@ RESPAWNED_S = 3.0           # back in ~1 s, but clicks are ignored a bit longer
 def respawn(halt):
     if game.take_foreground() is None:
         return False
+    # Esc closes the Daily Rewards panel. Claim it first when it is already up.
+    hook = game.before_respawn
+    if hook and not halt():
+        try:
+            hook()
+        except Exception:
+            pass
     for key, wait in (('esc', 1.25), ('r', 0.75), ('enter', RESPAWNED_S)):
         press(key)
         if not nap(wait, halt):
@@ -411,12 +424,67 @@ def close_catch(halt):
     if st in ('fish', 'line'):
         return 'lost'
     if st == 'failed':
-        return fclick('fishingMinigameResultCloseButton', 0.1) and not halt() and 'failed'
+        # Fail-safe: keep clicking the close X until the failed popup is gone.
+        # The X can land in different positions (Roblox bug), so try every known
+        # exit spot on every retry: center X, window top-right, then extra
+        # corners/edges of the prompt box.
+        for go in range(1, TRIES + 1):
+            # 1) Standard fclick: center X + window top-right (built-in positions)
+            if fclick('fishingMinigameResultCloseButton', 0.1):
+                if wait_state(lambda s: s != 'failed', SEE_SHUT_S, halt) != 'failed':
+                    return not halt() and 'failed'
+            # 2) Extra exit positions around the X (keep all, add new ones)
+            root = fbox('fishingMinigamePromptWindowRoot', True)
+            w = game.roblox_window()
+            if root is not None and w is not None:
+                k = game.client_rect(w)[3] / 1080
+                rx, ry = root[0], root[1]
+                rw = root[2] - root[0]
+                rh = root[3] - root[1]
+                extra_positions = [
+                    # original fallback (right-hand X)
+                    (round(root[2] - 6 * k), round(root[1] + 7 * k)),
+                    # top-left corner of prompt
+                    (round(rx + 4 * k), round(ry + 4 * k)),
+                    # top-right corner of prompt
+                    (round(root[2] - 4 * k), round(ry + 4 * k)),
+                    # bottom-left corner of prompt
+                    (round(rx + 4 * k), round(root[3] - 4 * k)),
+                    # bottom-right corner of prompt
+                    (round(root[2] - 4 * k), round(root[3] - 4 * k)),
+                    # centre of prompt box
+                    (round((rx + root[2]) / 2), round((ry + root[3]) / 2)),
+                ]
+                for cx, cy in extra_positions:
+                    if game.click(cx, cy, park=False, settle=0):
+                        if wait_state(lambda s: s != 'failed', SEE_SHUT_S, halt) != 'failed':
+                            return not halt() and 'failed'
+            print('fishing: failed window still up after its X (go %d of %d)' % (go, TRIES))
+            time.sleep(0.2)
+        return False
     for go in range(1, TRIES + 1):
         if not fclick('fishingMinigameResultCloseButton', 0.1):
             return False
         if wait_state(lambda st: st != 'catch', SEE_SHUT_S, halt) != 'catch':
             return not halt() and 'caught'
+        # Extra exit positions around the X (keep all standard positions first)
+        root = fbox('fishingMinigamePromptWindowRoot', True)
+        w = game.roblox_window()
+        if root is not None and w is not None:
+            k = game.client_rect(w)[3] / 1080
+            rx, ry = root[0], root[1]
+            extra_positions = [
+                (round(root[2] - 6 * k), round(root[1] + 7 * k)),
+                (round(rx + 4 * k), round(ry + 4 * k)),
+                (round(root[2] - 4 * k), round(ry + 4 * k)),
+                (round(rx + 4 * k), round(root[3] - 4 * k)),
+                (round(root[2] - 4 * k), round(root[3] - 4 * k)),
+                (round((rx + root[2]) / 2), round((ry + root[3]) / 2)),
+            ]
+            for cx, cy in extra_positions:
+                if game.click(cx, cy, park=False, settle=0):
+                    if wait_state(lambda st: st != 'catch', SEE_SHUT_S, halt) != 'catch':
+                        return not halt() and 'caught'
         print('fishing: catch window still up after its X (go %d of %d)' % (go, TRIES))
     return not halt() and 'caught'
 
@@ -466,6 +534,50 @@ def _ocr_texts(img, det=True):
         if txt:
             out.append(txt)
     return out
+
+
+def read_fish_points():
+    """Fish points/coins from the top number of the three at the game client's bottom-left.
+    Returns an int, or None when the window is gone or the number can't be read."""
+    w = game.roblox_window()
+    if w is None:
+        return None
+    x0, y0, cw, ch = game.client_rect(w)
+    if cw <= 0 or ch <= 0:
+        return None
+    # The currency sits at ~0.025 of the width and ~0.895 of the height, just above
+    # the two smaller stats under it. Upscale before OCR: the digits are only ~14 px tall.
+    box = (round(x0 + 0.005 * cw), round(y0 + 0.875 * ch),
+           round(x0 + 0.13 * cw), round(y0 + 0.925 * ch))
+    img = game.grab(box)
+    if img is None or img.size == 0:
+        return None
+    up = np.ascontiguousarray(np.asarray(img)[..., ::-1])
+    up = np.repeat(np.repeat(up, 3, axis=0), 3, axis=1)
+    try:
+        result, _ = merchant.reader()(up, use_det=True, use_cls=False)
+    except Exception:
+        return None
+    best = None
+    for row in (result or ()):
+        if not row:
+            continue
+        txt = row[1] if len(row) >= 3 else row[0]
+        if isinstance(txt, (list, tuple)):
+            txt = txt[0] if txt else ''
+        compact = re.sub(r'[^0-9]', '', str(txt or ''))
+        if not compact or not (3 <= len(compact) <= 12):
+            continue
+        # Three counters are stacked. The top one is fish points.
+        top = 0
+        box = row[0] if len(row) >= 3 else None
+        try:
+            top = min(p[1] for p in box) if box is not None else 0
+        except (TypeError, ValueError, IndexError):
+            top = 0
+        if best is None or top < best[0]:
+            best = (top, int(compact))
+    return None if best is None else best[1]
 
 
 def _shop_info_box():
@@ -620,7 +732,7 @@ def sell(halt, times=1, say=print, every=True):
 class Fisher:
     """One fishing session: get to the spot, catch, and step through a failsafe when nothing bites."""
 
-    def __init__(self, vip=True, sell_every=0, sell_amount=10, sell_all=True, full_check=True, say=print, report=None):
+    def __init__(self, vip=True, sell_every=0, sell_amount=10, sell_all=True, full_check=True, say=print, report=None, on_balance=None):
         self.shop_route, self.spot_route = (TO_SHOP, TO_SPOT) if vip else (TO_SHOP_FREE, TO_SPOT_FREE)
         self.sell_every = max(0, int(sell_every or 0))
         self.sell_amount = max(1, int(sell_amount or 1))
@@ -630,11 +742,13 @@ class Fisher:
         slow, bugged = 0.0, False
         self.say = say
         self.report = report        # failsafe steps go to the webhook
+        self.on_balance = on_balance   # current on-screen fish points, not the sale delta
         self.at_spot = False
         self.cast_at = None
         self.idle = 0
         self.stage = 0
         self.caught = self.since_sell = 0
+        self.points_earned = 0               # fish points/coins gained from sales this run
         self.lost_run = 0
         self.zoomed = False
         self.hold = False           # merchant: land the fish, then stop casting
@@ -693,6 +807,7 @@ class Fisher:
         """Spawn -> Flarg to sell -> fishing spot, then cast."""
         self.say('to the fishing spot, selling at Captain Flarg on the way')
         self.zoomed = False                     # respawn resets the camera
+        sold_ok = False
         for trip in range(1, SHOP_TRIPS + 1):
             if not respawn(halt) or not game.align_camera(halt):
                 if game.align_fails >= ALIGN_REJOIN and not halt():
@@ -701,10 +816,23 @@ class Fisher:
                 return False
             if not walk(self.shop_route, halt) or not nap(0.3, halt):
                 return False
+            points_before = read_fish_points()
+            if points_before is not None and self.on_balance:
+                self.on_balance(points_before)
             if talked(halt):
                 sold = sell(halt, self.sell_amount, self.say, self.sell_all)
+                points_after = read_fish_points()
+                if points_after is not None and self.on_balance:
+                    self.on_balance(points_after)
+                if points_before is not None and points_after is not None and points_after > points_before:
+                    gained = points_after - points_before
+                    self.points_earned += gained
+                else:
+                    gained = 0
                 if sold is not False:              # 0 = bag was already empty
-                    self.say('sold the fish: %d Sell All, %d caught since the last sell' % (sold, self.since_sell))
+                    sold_ok = True
+                    self.say('sold the fish: %d Sell All, %d caught since the last sell, +%d points'
+                             % (sold, self.since_sell, gained))
                     self.since_sell = 0
                 elif halt():
                     return False
@@ -721,7 +849,8 @@ class Fisher:
                 self.since_sell = 0             # so it retries after the next batch, not every fish
         if not nap(0.2, halt) or not walk(self.spot_route, halt):
             return False
-        self.at_spot = self.after_sell = True
+        self.at_spot = True
+        self.after_sell = sold_ok  # only a real sale makes a still-full bag a rejoin reason
         if not self.cast(halt):
             self.at_spot = False
             return False
@@ -734,6 +863,8 @@ class Fisher:
 
     def step(self, halt, wait=8.0):
         """Wait up to `wait` s for a bite and land it. False if stopped."""
+        if game.PAUSED.is_set() and not game.ABORT:
+            return True                         # paused for the user: hold, do not fish
         if not self.at_spot:
             return self.to_spot(halt)
         if (self.pause or self.hold) and not self.line_out:
@@ -749,7 +880,11 @@ class Fisher:
                     peak, cutoff(self.idle)))
                 return not halt()
             landed = close_catch(halt)
-            if halt() or not landed:
+            if halt():
+                return False
+            if not landed:
+                self.rejoin = 'failed catch popup would not close'
+                self.say('Fishing popup stuck: rejoining')
                 return False
             self.stage = self.dry = 0
             if landed == 'failed':

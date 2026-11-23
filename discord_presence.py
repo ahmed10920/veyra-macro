@@ -78,6 +78,7 @@ class DiscordPresence:
         self._want = None
         self._sent = None
         self._images_ok = True
+        self._image_retry_at = 0.0
         self._status = 'off'
         self._detail = 'Discord activity is off'
         self._logged = None
@@ -141,8 +142,13 @@ class DiscordPresence:
         buf = b''
         while not self._stop.is_set():
             enabled, client_id, want, images_ok, sent = self._snapshot()
+            if not images_ok and time.monotonic() >= self._image_retry_at:
+                with self._lock:
+                    self._images_ok = True
+                    self._sent = None
+                images_ok = True                          # try the images again after a cooldown
             if not enabled or not _valid_id(client_id):
-                handle = _drop(handle, clear=bool(enabled and handle))
+                handle = _drop(handle, clear=bool(handle))
                 buf = b''
                 live_id = ''
                 if not enabled:
@@ -188,6 +194,7 @@ class DiscordPresence:
                     with self._lock:
                         self._images_ok = False
                         self._sent = None
+                        self._image_retry_at = time.monotonic() + 60.0
             except OSError:
                 handle = _drop(handle, clear=False)
                 buf = b''
@@ -220,7 +227,8 @@ class DiscordPresence:
                     msg = _json(raw)
                     if msg.get('evt') == 'READY':
                         return handle, 'ok', buf
-                    if msg.get('evt') == 'ERROR' or msg.get('code') == 4000:
+                    data = msg.get('data')
+                    if msg.get('evt') == 'ERROR' or (isinstance(data, dict) and data.get('code') == 4000):
                         _drop(handle, clear=False)
                         return None, 'bad_id', b''
                 time.sleep(0.02)
@@ -286,14 +294,35 @@ def _wire_activity(activity, images_ok):
     timestamps = activity.get('timestamps')
     if isinstance(timestamps, dict) and timestamps.get('start'):
         body['timestamps'] = {'start': int(timestamps['start'])}
+    # Discord renders party.size as "1 of 20" on the profile.
+    party = activity.get('party')
+    if isinstance(party, dict):
+        size = party.get('size')
+        if isinstance(size, (list, tuple)) and len(size) == 2:
+            body['party'] = {'size': [int(size[0]), int(size[1])]}
+            if party.get('id'):
+                body['party']['id'] = str(party['id'])[:128]
+    # Discord shows these as clickable buttons on the activity card (max 2).
+    buttons = activity.get('buttons')
+    if isinstance(buttons, (list, tuple)):
+        pair = []
+        for b in buttons[:2]:
+            if isinstance(b, dict) and b.get('label') and b.get('url'):
+                pair.append({'label': str(b['label'])[:32], 'url': str(b['url'])[:512]})
+        if pair:
+            body['buttons'] = pair
     assets = activity.get('assets') if images_ok else None
     if isinstance(assets, dict) and assets.get('large_image'):
-        body['assets'] = {
-            'large_image': str(assets.get('large_image') or '')[:256],
+        block = {
+            'large_image': str(assets['large_image'])[:256],
             'large_text': str(assets.get('large_text') or '')[:128],
         }
-        if assets.get('small_text'):
-            body['assets']['small_text'] = str(assets['small_text'])[:128]
+        # Discord ignores small_text unless a small_image is sent with it.
+        if assets.get('small_image'):
+            block['small_image'] = str(assets['small_image'])[:256]
+            if assets.get('small_text'):
+                block['small_text'] = str(assets['small_text'])[:128]
+        body['assets'] = block
     return body
 
 

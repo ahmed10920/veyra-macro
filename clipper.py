@@ -247,6 +247,9 @@ class Clipper:
 
     def stop(self):
         self.stop_event.set()
+        t = self.thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=2.0)     # let start() actually restart instead of seeing a draining thread
 
     def _run(self):
         gap = 1.0 / self.fps
@@ -302,11 +305,15 @@ class Clipper:
                 first = cv2.imdecode(frames[0][1], cv2.IMREAD_COLOR)
                 h, w = first.shape[:2]
                 out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                for _, jpg in frames:
-                    img = cv2.imdecode(jpg, cv2.IMREAD_COLOR)
-                    if img is not None and img.shape[:2] == (h, w):
-                        out.write(img)
-                out.release()
+                try:
+                    if not out.isOpened():
+                        raise RuntimeError('the mp4v codec is unavailable')
+                    for _, jpg in frames:
+                        img = cv2.imdecode(jpg, cv2.IMREAD_COLOR)
+                        if img is not None and img.shape[:2] == (h, w):
+                            out.write(img)
+                finally:
+                    out.release()
         except Exception as e:
             self.say('clip failed - %s: %s' % (type(e).__name__, e))
             path = None

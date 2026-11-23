@@ -41,7 +41,7 @@ def _nearest(cw, ch):
 
 
 def _lerp(xs, ys, x):
-    i = 1 if x <= xs[1] else len(xs) - 1
+    i = next((j for j in range(1, len(xs)) if x <= xs[j]), len(xs) - 1)
     return ys[i - 1] + (ys[i] - ys[i - 1]) * (x - xs[i - 1]) / (xs[i] - xs[i - 1])
 
 

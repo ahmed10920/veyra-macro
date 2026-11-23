@@ -1,6 +1,7 @@
 """Auto merchant: teleport to it when it arrives, read its shop with OCR, buy what's on the list."""
 import difflib
 import re
+import threading
 import time
 
 import cv2
@@ -21,13 +22,25 @@ KNOWN_ITEMS = [
     "Potion of Bound", "Merchant Tracker", "Heavenly Potion",
 ]
 SLOTS = 5
-TELEPORT_S = 3.0         # after Use, until we're close enough to talk
-SHOP_WAIT_S = 8.0        # Shop -> dialogue slides off -> fade to black -> fade back
+TELEPORT_S = 2.0         # after Use, until we're close enough to talk
+SHOP_WAIT_S = 4.5        # Shop -> dialogue slides off -> fade to black -> fade back
 MESSAGE = (0.275, 0.835, 0.725, 0.865)    # the shop's answer line: green "You purchased ...", red on errors
 TIER = re.compile(r'(?i)(?:un)?c[o0]mm[o0]n|r[ao]re|ep[il1]c|legend[ao]ry|myth[il1]c[ao]l')
 OCR_THREADS = 2          # 2 is as accurate as 4 and uses less CPU
 
 _reader = None
+_ocr_lock = threading.Lock()
+
+
+class _LockedReader:
+    """RapidOCR is not safe to call from two threads at once."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __call__(self, *args, **kwargs):
+        with _ocr_lock:
+            return self._inner(*args, **kwargs)
 
 
 def wanted_from_text(text):
@@ -93,13 +106,15 @@ def _identify(text, names):
 def reader():
     global _reader
     if _reader is None:
-        from rapidocr_onnxruntime import RapidOCR
-        try:
-            _reader = RapidOCR(intra_op_num_threads=OCR_THREADS, det_intra_op_num_threads=OCR_THREADS,
-                               rec_intra_op_num_threads=OCR_THREADS)
-        except Exception:
-            _reader = RapidOCR()
-    return _reader
+        with _ocr_lock:
+            if _reader is None:
+                from rapidocr_onnxruntime import RapidOCR
+                try:
+                    _reader = RapidOCR(intra_op_num_threads=OCR_THREADS, det_intra_op_num_threads=OCR_THREADS,
+                                       rec_intra_op_num_threads=OCR_THREADS)
+                except Exception:
+                    _reader = RapidOCR()
+    return _LockedReader(_reader)
 
 
 def read_lines(img):
@@ -132,8 +147,9 @@ def slot_item(i, names):
     for scale in (2, 1):
         lines = read_slot(i, scale)
         item = identify(' '.join(lines), names) or identify_lines(lines, names)
-        if item or not lines:
+        if item:
             return item
+        # An empty 2x read is exactly when 1x is worth trying (upscaling can blur small glyphs).
     return None
 
 
@@ -199,27 +215,39 @@ def open_shop(halt, say=print):
             game.down('e')
             time.sleep(0.1)
             game.up('e')
-            if not nap(1.0, halt):
+            if not nap(0.6, halt):
                 return False
         for _ in range(3):
             if points.dialogue_up():
                 break                                   # choices are up: a click here can pick one
-            points.click('dialogueSkipDialogue', 0.3)
-        if not nap(0.8, halt):
+            points.click('dialogueSkipDialogue', 0.2)
+        if not nap(0.45, halt):
             return False
         at = points.choice('green') if points.dialogue_up() else None
         if at is None:
             say('  try %d: no Open Shop choice yet' % go)
             continue
         game.click(*at, park=False)
-        if not nap(1.5, halt):
+        if not nap(0.8, halt):
             return False
-        if points.dialogue_up():                        # the click was lost
+        if points.dialogue_up():                        # the click was lost: retry the same choice
             lost += 1
-            say('  try %d: Open Shop was clicked but stayed up' % go)
+            say('  try %d: Open Shop was clicked but stayed up (retrying the choice)' % go)
+            for retry in range(3):
+                if halt():
+                    return False
+                again = points.choice('green')
+                if again is None or not points.dialogue_up():
+                    break
+                game.click(*again, park=False)
+                if not nap(0.5, halt):
+                    return False
+                if not points.dialogue_up():            # it took
+                    points.leave_dialogue()
+                    return nap(0.3, halt)
             continue
         points.leave_dialogue()
-        return nap(0.5, halt)
+        return nap(0.3, halt)
     if lost:
         return failed('Open Shop was clicked %d times but the shop never opened' % lost, say)
     return failed('Pressed E 4 times but the Open Shop choice never came up (the teleport missed, '
@@ -239,7 +267,7 @@ def read_shop(names, halt):
         k += 1
         if time.perf_counter() > end or not nap(0.1, halt):
             break
-    if not nap(0.6, halt):                                      # the rest of its 0.5 s fade from black
+    if not nap(0.35, halt):                                     # the rest of its fade from black
         return {}
     found = {}
     for attempt in range(2):
@@ -252,7 +280,7 @@ def read_shop(names, halt):
                 item = None
             if item:
                 found[i] = item
-        if len(found) == SLOTS or not nap(0.3, halt):
+        if len(found) == SLOTS or not nap(0.2, halt):
             break
     return found
 
@@ -310,11 +338,11 @@ def answer(before, halt):
         if int((g & ~g0).sum() + (r & ~r0).sum()) > 20 + 0.05 * int(g0.sum() + r0.sum()):
             break
         late = time.perf_counter() - start
-        idle = idle + 1 if late > 1.0 * game.PACE and lit('merchantShopPurchaseButton') else 0
-        if idle >= 2 or late > 6.0 * game.PACE or halt():      # no veil either: the click was lost
+        idle = idle + 1 if late > 0.7 * game.PACE and lit('merchantShopPurchaseButton') else 0
+        if idle >= 2 or late > 4.0 * game.PACE or halt():      # no veil either: the click was lost
             return None
-        time.sleep(0.1)
-    if not nap(0.35, halt):                                     # it grows in over 0.3 s
+        time.sleep(0.08)
+    if not nap(0.25, halt):                                     # it grows in over 0.2 s
         return None
     rgb, g, r = answer_band()
     h = rgb.shape[0]
@@ -329,7 +357,7 @@ def answer(before, halt):
 
 def purchase(amount, halt):
     """Set the amount (None = Set to Max), Purchase, read the answer."""
-    if not wait(lambda: lit('merchantShopPurchaseButton'), 8.0, halt):       # still loading, or buying the last one
+    if not wait(lambda: lit('merchantShopPurchaseButton'), 5.0, halt):       # still loading, or buying the last one
         return None
     if amount is None:
         points.click('merchantShopSetToMaxButton', 0.15)
@@ -340,7 +368,7 @@ def purchase(amount, halt):
                 game.tap(key, hold=0.01, gap=0.01)
         game.type_term(str(amount), clear=False)
     before = answer_band()
-    if halt() or not points.click('merchantShopPurchaseButton', 0.3):
+    if halt() or not points.click('merchantShopPurchaseButton', 0.2):
         return None
     return answer(before, halt)
 
