@@ -253,7 +253,7 @@ BIOMES_DIR = os.path.join(HERE_DIR, 'biomes')
 os.makedirs(BIOMES_DIR, exist_ok=True)
 
 TITLE = 'Veyra'
-VERSION = '1.0.4'
+VERSION = '1.0.5'
 
 # Unified developer-mode passkey (baked into the .exe; session-only unlock).
 # Only the person who knows this key can open Developer Mode.
