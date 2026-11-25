@@ -53,6 +53,43 @@ def cache_found():
     return db_path() is not None
 
 
+def clear_cache_except_db(path=None):
+    """Remove old cached asset files from Roblox's rbx-storage/ folder but keep rbx-storage.db.
+
+    Returns how many files were removed. The sqlite db itself (and its -wal/-shm) is left alone.
+    """
+    path = path or db_path()
+    if not path:
+        return 0
+    d = os.path.join(os.path.dirname(path), 'rbx-storage')
+    if not os.path.isdir(d):
+        return 0
+    removed = 0
+    for root, dirs, files in os.walk(d, topdown=False):
+        for name in files:
+            try:
+                os.remove(os.path.join(root, name))
+                removed += 1
+            except OSError:
+                pass
+        for name in dirs:
+            try:
+                os.rmdir(os.path.join(root, name))
+            except OSError:
+                pass
+    return removed
+
+
+def display_path(path):
+    """Hide this PC's LocalAppData in a log without inserting it into an unrelated path."""
+    if not path:
+        return ''
+    base = LOCAL or ''
+    if base and os.path.normcase(path).startswith(os.path.normcase(base + os.sep)):
+        return '%LOCALAPPDATA%' + path[len(base):]
+    return path
+
+
 def unreadable(path):
     """The cache files this Windows user can't open."""
     out = []

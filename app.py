@@ -1417,6 +1417,12 @@ class MacroEngine:
         seed_and_refresh_avatar(self.roblox_uid, on_ready=self._bump_cache_bust, stop_fn=lambda: self._closing)
 
         self.cache = merchant_cache.Tracker()
+        try:
+            removed = merchant_cache.clear_cache_except_db()
+            if removed:
+                note('merchant', 'cleared %d old cache file(s); rbx-storage.db kept' % removed)
+        except Exception as e:
+            note('merchant', 'cache clear skipped: %s: %s' % (type(e).__name__, e))
         self._keyboard = keyboard
         threading.Thread(target=self._watch_cache, daemon=True).start()
         threading.Thread(target=self._poll_hotkeys, daemon=True).start()
@@ -2333,7 +2339,7 @@ class MacroEngine:
                     path = self.cache.cache() or ''
                     bad = merchant_cache.unreadable(path) if path else []
                     note('merchant', 'Roblox\'s cache could not be read: %s: %s (%s%s)' % (
-                        type(e).__name__, e, path.replace(merchant_cache.LOCAL, '%LOCALAPPDATA%'),
+                        type(e).__name__, e, merchant_cache.display_path(path),
                         '; cannot open ' + ', '.join(bad) if bad else ''))
                     said = True
                 if not posted and self.running and (self.merchant_detect or self.boss_detect):
@@ -3293,7 +3299,7 @@ class MacroEngine:
         if game.ABORT or getattr(self, '_daily_busy', False):
             return
         try:
-            up = game.daily_state() is not None or game._daily_x()
+            up = game.daily_state() is not None
         except Exception:
             return
         if up:

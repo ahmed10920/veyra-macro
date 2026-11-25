@@ -28,6 +28,9 @@ DRY_CASTS = 2            # Fish doing nothing this many times = full bag
 REEL_S = 9.0             # a reel never lasts longer
 THIN = 20 / 405          # FishSol's 20 px of a 405 px bar
 RUN_TOL = 20             # zone colour drifts ~15 on bright backgrounds, the fill is ~100 off
+LOST_S = 1.5             # bar colour gone: click slow
+NEXT_PX = 6
+FILL_MIN = 130           # fill >= ~166, empty bar = 40% of the world <= ~102
 NO_BITE_S = 30.0        # then the failsafe takes a step
 REEL_MIN_S = 1.0
 BAR_SHOWS_S = 1.5
@@ -74,9 +77,7 @@ def walk(route, halt):
                     return False
                 if game.PAUSED.is_set() and not game.ABORT:
                     # hold the walk while the user has the PC; paused time does not count
-                    t0 = time.perf_counter()
                     time.sleep(0.05)
-                    end += time.perf_counter() - t0
                     continue
                 time.sleep(0.005)
             if how == 'down':
@@ -128,20 +129,69 @@ def majority(mask):
     return sum(p[y:y + h, x:x + w] for y in range(3) for x in range(3)) >= 5
 
 
-def run_width(rgb, colour):
-    """Longest run of the bar colour on any row, or None if it's not there."""
+def run_span(rgb, colour):
+    """(width, left x) of the longest run of the bar colour on any row, or None if it's not there."""
     diff = np.abs(rgb.astype(int) - np.array(colour))
     run = majority(np.all(diff <= RUN_TOL, axis=2))
-    if not (np.all(diff <= 5, axis=2) & run).any():
+    if run.sum() < 6:
         return None
-    best = 0
+    best = (0, 0)
     for row in run:
         idx = np.flatnonzero(row)
         if idx.size:
             gaps = np.flatnonzero(np.diff(idx) > 1)
             starts, ends = np.r_[0, gaps + 1], np.r_[gaps, idx.size - 1]
-            best = max(best, int((idx[ends] - idx[starts]).max()) + 1)
+            k = int((idx[ends] - idx[starts]).argmax())
+            best = max(best, (int(idx[ends[k]] - idx[starts[k]]) + 1, int(idx[starts[k]])))
     return best
+
+
+def run_width(rgb, colour):
+    span = run_span(rgb, colour)
+    return None if span is None else span[0]
+
+
+def left_of(rgb, x):
+    """Just left of a run: the fill (bright) or the empty bar (dark)? None at the bar's left end."""
+    if x < NEXT_PX + 2:
+        return None
+    side = rgb[:, x - NEXT_PX - 2:x - 2].reshape(-1, 3).astype(int)
+    return 'fill' if side.max(axis=1).mean() >= FILL_MIN else 'empty'
+
+
+def bar_rows(bar):
+    """The bar between its two light outline lines, looked for a few px around the box; the box itself if unseen."""
+    pad = max(4, (bar[3] - bar[1]) // 2)
+    img = game.grab((bar[0], bar[1] - pad, bar[2], bar[3] + pad))
+    if img is None or img.size == 0:
+        return bar
+    on = np.flatnonzero((img.min(axis=2) >= 110).mean(axis=1) >= 0.9)
+    if on.size < 2 or on[-1] - on[0] < 0.6 * (bar[3] - bar[1]) or on[-1] - on[0] > 1.5 * (bar[3] - bar[1]):
+        return bar
+    top = bar[1] - pad
+    return bar[0], top + int(on[0]) + 1, bar[2], top + int(on[-1])
+
+
+def sample(bar, halt):
+    """The zone colour: most common colour in a full-height block where the zone starts, once two looks agree."""
+    w = bar[2] - bar[0]
+    x0, x1 = bar[0] + w * 186 // 405, bar[0] + w * 206 // 405
+    last = None
+    for _ in range(60):
+        px = game.grab((x0, bar[1], x1, bar[3])).reshape(-1, 3).astype(int)
+        hi, lo = px.max(axis=1), px.min(axis=1)
+        px = px[(lo < 200) & (hi >= 100) & (hi - lo >= 30)]          # no text, backdrop or grey fade-in
+        c = None
+        if len(px) >= 20:
+            _, which, count = np.unique(px // 12, axis=0, return_inverse=True, return_counts=True)
+            c = tuple(int(v) for v in px[which.ravel() == count.argmax()].mean(axis=0))
+        if c is not None and last is not None and max(abs(a - b) for a, b in zip(c, last)) <= 8:
+            return c
+        if halt():
+            break
+        last = c
+        time.sleep(0.02)
+    return last
 
 
 def fast_click():
@@ -172,7 +222,7 @@ def cast(halt, zoom=ZOOM_OUT_S, full_check=True):
             return 'full'
         print('fishing: Fish still showing after the click (go %d of %d)' % (go, TRIES))
         fclick('fishingMinigameResultCloseButton')  # the centred window can leave Fish dead even when not seen as moved
-    return not halt()
+    return 'full' if bag_full() else False
 
 
 def bag_full():
@@ -352,13 +402,18 @@ def wait_state(want, seconds, halt):
     return st
 
 
-def catch_bar_up():
-    """Catch bar showing? Its outline is a long straight light line. None if unknown."""
+def catch_bar_up(new=False):
+    """Catch bar showing (a long light outline line)? None if unknown. `new` also wants it still empty inside."""
     b = fbox('fishingMinigameCatchBarOuter')
     if b is None:
         return None
-    rgb = game.grab((b[0], b[1] - 3, b[2], b[3] + 3))
-    return bool(((rgb.min(axis=2) >= 120).mean(axis=1) >= 0.9).any())
+    pad = max(3, b[3] - b[1])                                # windowed Roblox draws it a few px off
+    v = game.grab((b[0], b[1] - pad, b[2], b[3] + pad)).min(axis=2).astype(int)
+    on = np.flatnonzero((v >= 120).mean(axis=1) >= 0.9)
+    if not on.size:
+        return False
+    rows = v[on[0]:on[-1] + 1].mean(axis=1)
+    return not new or bool(rows.min() < rows.max() - 40)     # darker inside than its lines
 
 
 def reel(halt):
@@ -368,39 +423,49 @@ def reel(halt):
         return 0
     game.glide(*park)
     end = time.perf_counter() + BAR_SHOWS_S
-    up = catch_bar_up()
+    up = catch_bar_up(True)
     while not up and time.perf_counter() < end and not halt():
         time.sleep(0.02)
-        up = catch_bar_up()
+        up = catch_bar_up(True)
     if not up and window_state() == 'line':
-        return None                              # no catch bar: a click here hits Exit
-    # sample spot: over the success zone at the start, above the timer
-    mid = (bar[0] + (bar[2] - bar[0]) * 196 // 405, bar[1] + (bar[3] - bar[1]) * 5 // 21)
-    colour = pixel(mid)
-    for _ in range(60):
-        if not bad_colour(colour) or halt():
-            break
-        time.sleep(0.02)
-        colour = pixel(mid)
+        return None                              # no catch bar: a click would hit Exit
+    bar = bar_rows(bar)
+    colour = sample(bar, halt)
+    bar = bar_rows(bar)
     thin = max(3, round(THIN * (bar[2] - bar[0])))
     start = time.perf_counter()
     clicks, end, seen, gone = 0, start + REEL_S, False, 0
+    missing, plain = None, False
     while time.perf_counter() < end and not halt():
         up = catch_bar_up()
         seen = seen or bool(up)
         gone = gone + 1 if seen and up is False else 0
         if gone >= GONE_LOOKS and time.perf_counter() - start >= REEL_MIN_S:
             break                                # done, don't click into the catch window
-        if bad_colour(colour):
-            fast_click()                         # no real bar colour: click slow and safe
+        if colour is None or bad_colour(colour):
+            fast_click()                         # no bar colour: click slow
             clicks += 1
             time.sleep(0.15)
             continue
-        width = run_width(game.grab(bar), colour)
-        if width is None or width < thin:
+        img = game.grab(bar)
+        span = run_span(img, colour)
+        width = None if span is None else span[0]
+        missing = None if width is not None else missing or time.perf_counter()
+        if missing and time.perf_counter() - missing >= LOST_S:
             fast_click()
             clicks += 1
-            time.sleep(0.025)
+            time.sleep(0.15)
+            continue
+        side = None if width is None or width < thin else left_of(img, span[1])     # a stray few px: clicked anyway
+        if side == 'empty':
+            plain = True                         # a late look took the zone without the fill under it
+        elif side == 'fill' and plain:
+            c = np.median(img[:, span[1] - NEXT_PX - 2:span[1] - 2].reshape(-1, 3), axis=0)
+            if not bad_colour(c):
+                colour, plain = tuple(int(v) for v in c), False      # the fill is in the zone now: its colour
+        if width is None or width < thin or side == 'empty':
+            fast_click()
+            clicks += 1
         time.sleep(0.01)
     return clicks
 
@@ -410,6 +475,9 @@ def close_catch(halt):
     Needs a proper click (Roblox forward, glide onto it)."""
     if not nap(CLOSE_WAIT_S, halt):
         return False
+    x = points.centre('fishingMinigameResultCloseButton')
+    if x is not None:
+        game.glide(*x)              # hover the X so the click lands as it shows
     start, st = time.perf_counter(), None
     while not halt():
         st = window_state()                       # only 'catch' once the X is drawn
@@ -758,6 +826,8 @@ class Fisher:
         self.dry = 0
         self.after_sell = False     # next cast is the first since selling
         self.rejoin = False         # for the app: rejoin Roblox
+        self.nudged = False         # nudged the character back onto the fishing pad this walk
+        self.unbarred = None        # bite-without-bar warning logged once per cast
 
     def cast(self, halt, zoom=None):
         global peak, dipped
@@ -766,7 +836,9 @@ class Fisher:
             zoom = ZOOM_TOPUP_S if self.zoomed else ZOOM_OUT_S
         done = cast(halt, zoom, self.full_check)
         if done == 'full':
-            return self.full_bag()
+            return self.full_bag(halt)
+        if done is False:
+            return False
         self.after_sell = False
         ok = done and nap(0.5, halt)
         self.zoomed = self.zoomed or bool(ok)
@@ -774,15 +846,18 @@ class Fisher:
         self.cast_at, self.idle, peak, dipped = time.monotonic(), icon_level(), 0, False
         return ok
 
-    def full_bag(self):
+    def full_bag(self, halt):
         """Sell, or rejoin if it's still full on the first cast after selling."""
         self.line_out = self.at_spot = False
         if self.after_sell:
             self.rejoin = 'inventory still full right after selling'
             self.failsafe('%s: rejoining' % self.rejoin)
-        else:
-            self.failsafe('inventory full: selling')
-        self.since_sell = 0
+            return False
+        self.failsafe('inventory full: selling')
+        if not self.to_spot(halt):
+            self.rejoin = 'inventory full but Flarg unreachable: rejoining'
+            self.failsafe('%s: rejoining' % self.rejoin)
+            return False
         return True
 
     def failsafe(self, what):
@@ -795,6 +870,32 @@ class Fisher:
         """We got moved (rejoin, merchant teleport): walk back before casting."""
         self.at_spot = self.line_out = self.zoomed = False
         self.hold = False
+
+    def no_menu(self, halt):
+        """No fishing window at all on three looks in a row (a moment's blank is just a redraw)."""
+        for _ in range(3):
+            if window_state() is not None or not nap(0.15, halt):
+                return False
+        return True
+
+    def no_bite(self, halt):
+        """Nothing bit for NO_BITE_S: recast, walk back to the spot or sell, in turn."""
+        if self.pause or self.hold:
+            self.say('no bite in %d s with %s waiting: reeling in' % (NO_BITE_S, 'SC/BR' if self.pause else 'a merchant'))
+            return self.reel_in(halt)
+        self.stage = (self.stage + 1) % 4
+        self.say('bite icon: %d at the cast, %d at its brightest, a bite needs %d'
+                 % (self.idle, peak, cutoff(self.idle)))
+        self.failsafe({1: 'no bite in %d s: casting again' % NO_BITE_S, 3: 'no bite in %d s: casting again' % NO_BITE_S,
+                       2: 'still no bite: walking back to the spot',
+                       0: 'still no bite: a full bag looks like this - selling'}[self.stage])
+        fclick('fishingMinigameResultCloseButton', 0.1)    # shut any leftover window first
+        if self.stage in (1, 3):
+            if not nap(1.0, halt):
+                return False
+            return self.cast(halt, 0.0 if self.zoomed else None)
+        self.at_spot = False
+        return True
 
     def reel_in(self, halt):
         """Press Exit, only if it's showing (the same spot is Fish otherwise)."""
@@ -863,6 +964,8 @@ class Fisher:
 
     def step(self, halt, wait=8.0):
         """Wait up to `wait` s for a bite and land it. False if stopped."""
+        if self.rejoin:                 # the app rejoins first
+            return not halt()
         if game.PAUSED.is_set() and not game.ABORT:
             return True                         # paused for the user: hold, do not fish
         if not self.at_spot:
@@ -876,9 +979,14 @@ class Fisher:
         if bitten(wait, halt, self.idle):
             clicks = reel(halt)
             if clicks is None:
-                self.say('the bite icon lit up (%d, needs %d) but no catch bar came: still waiting' % (
-                    peak, cutoff(self.idle)))
-                return not halt()
+                if time.monotonic() - self.cast_at < NO_BITE_S:
+                    if self.cast_at != self.unbarred:       # once per cast, not every look
+                        self.unbarred = self.cast_at
+                        self.say('the bite icon lit up (%d, needs %d) but no catch bar came: still waiting' % (
+                            peak, cutoff(self.idle)))
+                    return not halt()
+                self.say('the bite icon lit up but no catch bar came within %d s' % NO_BITE_S)
+                return self.no_bite(halt)
             landed = close_catch(halt)
             if halt():
                 return False
@@ -937,24 +1045,25 @@ class Fisher:
             self.dry += 1
             if self.dry > DRY_CASTS:
                 self.dry = 0
-                return self.full_bag()
+                return self.full_bag(halt)
             self.say('the line is not out (Fish showing): casting again')
             return self.cast(halt)
+        if st is None and not self.line_out and self.no_menu(halt):     # line out but no fish menu: nudge back onto the pad
+            if self.nudged:                                             # second time this walk: walk back to the spot
+                self.say('fish menu missing: walking back to the spot')
+                self.at_spot = self.line_out = False
+                return not halt()
+            self.nudged = True
+            self.say('fish menu missing: nudging back onto the pad')
+            press('w', 0.2)                                             # a step brings the menu back
+            if not nap(0.5, halt):
+                return False
+            if window_state() == 'fish':
+                return self.cast(halt)
+            return not halt()
         if time.monotonic() - self.cast_at < NO_BITE_S:
             return not halt()
         if self.pause or self.hold:
             self.say('no bite in %d s with %s waiting: reeling in' % (NO_BITE_S, 'SC/BR' if self.pause else 'a merchant'))
             return self.reel_in(halt)
-        self.stage = (self.stage + 1) % 4
-        self.say('bite icon: %d at the cast, %d at its brightest, a bite needs %d'
-                 % (self.idle, peak, cutoff(self.idle)))
-        self.failsafe({1: 'no bite in %d s: casting again' % NO_BITE_S, 3: 'no bite in %d s: casting again' % NO_BITE_S,
-                       2: 'still no bite: walking back to the spot',
-                       0: 'still no bite: a full bag looks like this - selling'}[self.stage])
-        fclick('fishingMinigameResultCloseButton', 0.1)    # shut any leftover window first
-        if self.stage in (1, 3):
-            if not nap(1.0, halt):
-                return False
-            return self.cast(halt, 0.0 if self.zoomed else None)
-        self.at_spot = False
-        return True
+        return self.no_bite(halt)

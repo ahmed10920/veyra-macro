@@ -2011,72 +2011,59 @@ def _daily_x(rgb=None):
 
 
 def daily_open(rgb=None):
-    """Is the Daily Rewards window up? The X or the Claim button is enough."""
-    if _daily_x(rgb):
-        return True
-    return rgb is None and daily_state() is not None
+    """Is the Daily Rewards window up? The Claim button state is enough."""
+    return daily_state(rgb) is not None
 
 
 def close_daily():
     """Claim the daily reward if it is still available, then close the window.
     True when a window was there."""
     state = daily_state()
-    if state is None and not _daily_x():
+    if state is None:
         return False
-    if state != 'claimed':
-        press_point('daily_claim', settle=1.2)
-        paced(DAILY_CLAIM_S)
-    for _ in range(DAILY_CLOSE_TRIES):
-        if daily_state() is None and not _daily_x():
-            return True
-        if not press_point('daily_close', settle=0.6):
+    if state == 'claim':
+        press_point('daily_claim', settle=1.5)
+    for _ in range(3):
+        press_point('daily_close', settle=0.6)
+        if daily_state() is None:
             break
-    return daily_state() is None and not _daily_x()
+    return daily_state() is None
 
 
 def daily_state(rgb=None):
-    """'claim' (Claim still live), 'claimed' (Claimed!) or None (no window).
-    The button is a dark plate with green lettering, or a solid green Claim."""
+    """'claim' (green Claim up), 'claimed' (Claim dimmed) or None (no window)."""
     if rgb is None:
         import points
         rgb = points.grab('dailyRewardsClaimButton')
     if rgb is None or rgb.size == 0:
         return None
     r, g, b = (rgb[..., i].astype(int) for i in range(3))
-    dark = float((rgb.max(axis=2) < 50).mean())
-    bright = float(((g - r > 35) & (g - b > 15) & (g > 170)).mean())
-    mid = float(((g - r > 25) & (g - b > 12) & (g > 90) & (g < 175)).mean())
-    if bright > 0.12:
+    if (rgb.max(axis=2) < 45).mean() < 0.5:     # Claim's dark cover leaves ~7% visible
+        return None
+    greenish = (g - r > 40) & (g - b > 30) & (b >= r - 5)      # grass has less blue than red
+    if (greenish & (g > 200)).mean() > 0.03:
         return 'claim'
-    if dark > 0.45 and bright > 0.04:
-        return 'claim'
-    if dark > 0.45 and mid > 0.02:
+    if (greenish & (g > 90) & (g < 160)).mean() > 0.03:
         return 'claimed'
     return None
 
 
 def daily_by_clicks(halt=stopped, wait=DAILY_SHOW_S):
-    """Claim if the window shows a live Claim, then close it.
-    `wait` is how long to watch for the panel. 0 looks once.
-    Returns 'claim'/'claimed'/'closed' when handled, 'stuck' if it would not close, False if none came up."""
+    """Claim if the window shows a live Claim, then close it. False if no window came up."""
     end = time.monotonic() + max(0.0, wait)
     state = daily_state()
-    while state is None and not _daily_x() and time.monotonic() < end and not halt():
-        paced(0.4)
+    while state is None and time.monotonic() < end and not halt():
+        paced(0.5)
         state = daily_state()
-    if state is None and not _daily_x():
+    if state is None:
         return False
-    if state != 'claimed':
-        press_point('daily_claim', settle=1.2)
-        paced(DAILY_CLAIM_S if wait else 0.8)
-        state = state or 'claim'
-    for go in range(DAILY_CLOSE_TRIES):
-        if halt() or (go and not _daily_x() and daily_state() is None):
-            break
+    if state == 'claim':
+        press_point('daily_claim', settle=1.5)
+    for _ in range(3):
         press_point('daily_close', settle=0.6)
-    if _daily_x() or daily_state() is not None:
-        return 'stuck'
-    return state or 'closed'
+        if daily_state() is None:
+            break
+    return state
 
 
 def item_pass(say=print, terms=(BR, SC)):
